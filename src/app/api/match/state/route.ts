@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMoltbookAuth } from "@/app/api/_lib/moltArenaAuth";
 import { supabase } from "@/app/api/_lib/supabase";
 import { isAddress } from "viem";
+import { checkOnChainStake, isStakeReady } from "@/app/api/_lib/stakeVerifier";
+import { checkAndResolveTimeouts, createRound1 } from "@/app/api/_lib/matchResolver";
 
 export async function GET(req: NextRequest) {
   let agent;
@@ -95,7 +97,54 @@ export async function GET(req: NextRequest) {
     : match.player1_address;
   const opponentName = isPlayer1 ? match.player2_name : match.player1_name;
 
-  // Fetch all rounds
+  // HEARTBEAT-DRIVEN RESOLUTION: Auto-resolve timeouts every time agent polls
+  if (match.status === "in_progress") {
+    await checkAndResolveTimeouts(matchId);
+    // Re-fetch match after resolution (wins might have changed)
+    const { data: updatedMatch } = await supabase
+      .from("matches")
+      .select("wins1, wins2, status, winner_address")
+      .eq("id", matchId)
+      .single();
+    if (updatedMatch) {
+      match.wins1 = updatedMatch.wins1;
+      match.wins2 = updatedMatch.wins2;
+      match.status = updatedMatch.status as typeof match.status;
+      match.winner_address = updatedMatch.winner_address;
+    }
+  }
+
+  // STAKE VERIFICATION: Check on-chain stake and auto-transition lobby → in_progress
+  if (match.status === "lobby") {
+    const lockedMatch = await checkOnChainStake(matchId);
+    if (isStakeReady(lockedMatch)) {
+      // Both players staked on-chain → transition to in_progress and create round 1
+      const { data: existingRound1 } = await supabase
+        .from("match_rounds")
+        .select("id")
+        .eq("match_id", matchId)
+        .eq("round_number", 1)
+        .single();
+
+      if (!existingRound1) {
+        // Create round 1 with commit deadline starting now
+        await createRound1(matchId);
+      }
+
+      // Update match status to in_progress
+      await supabase
+        .from("matches")
+        .update({
+          status: "in_progress",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", matchId);
+
+      match.status = "in_progress";
+    }
+  }
+
+  // Fetch all rounds (after potential round 1 creation)
   const { data: rounds, error: roundsError } = await supabase
     .from("match_rounds")
     .select(

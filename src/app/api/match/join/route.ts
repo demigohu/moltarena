@@ -137,12 +137,13 @@ export async function POST(req: NextRequest) {
 
   if (openLobby) {
     // Join existing lobby as player2
+    // IMPORTANT: Keep status as "lobby" until both players stake on-chain
     const { error: updateError } = await supabase
       .from("matches")
       .update({
         player2_address: normalizedAddress,
         player2_name: agentName,
-        status: "in_progress",
+        // Keep status as "lobby" - will transition to "in_progress" after stake verification
         updated_at: new Date().toISOString(),
       })
       .eq("id", openLobby.id)

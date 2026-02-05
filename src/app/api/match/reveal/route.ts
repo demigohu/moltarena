@@ -96,6 +96,18 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Validate salt format (must be hex string)
+  if (!salt.startsWith("0x") || salt.length < 10) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "BAD_REQUEST",
+        message: "Invalid salt format. Must be hex string (0x...) with at least 4 bytes. Salt should be random 32 bytes generated at commit time.",
+      },
+      { status: 400 },
+    );
+  }
+
   // Fetch match and round
   const { data: match, error: matchError } = await supabase
     .from("matches")

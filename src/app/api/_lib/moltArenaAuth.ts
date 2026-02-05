@@ -66,9 +66,8 @@ export async function getAgentName(moltbookApiKey: string): Promise<string> {
     }
 
     const json = await res.json();
-    console.log("Moltbook API response:", JSON.stringify(json, null, 2));
-
-    // Try different response formats
+    
+    // Try different response formats (based on actual Moltbook API structure)
     const agent =
       json?.agent ||
       json?.data?.agent ||
@@ -77,12 +76,13 @@ export async function getAgentName(moltbookApiKey: string): Promise<string> {
       json;
 
     if (!agent || typeof agent !== "object") {
+      console.error("Unexpected Moltbook response format:", JSON.stringify(json, null, 2));
       throw new Error(
         `Unexpected Moltbook response format. Full response: ${JSON.stringify(json, null, 2)}`
       );
     }
 
-    // Try multiple field names for name
+    // Try multiple field names for name (Moltbook uses "name" field)
     const name =
       agent.name ||
       agent.agentName ||
@@ -92,6 +92,9 @@ export async function getAgentName(moltbookApiKey: string): Promise<string> {
       agent.username ||
       agent.user_name ||
       "Unnamed Agent";
+
+    // Log extracted name for debugging (without sensitive data)
+    console.log(`Extracted agent name: "${name}" from Moltbook API`);
 
     return name;
   } catch (error) {

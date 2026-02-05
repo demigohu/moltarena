@@ -3,6 +3,7 @@ import { requireMoltbookAuth, getAgentName } from "@/app/api/_lib/moltArenaAuth"
 import { supabase } from "@/app/api/_lib/supabase";
 import { keccak256, toBytes } from "viem";
 import { isAddress } from "viem";
+import { checkOnChainStake, isStakeReady } from "@/app/api/_lib/stakeVerifier";
 
 type CommitBody = {
   matchId: string;
@@ -103,6 +104,19 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Verify stake on-chain before allowing commit
+  const lockedMatch = await checkOnChainStake(matchId);
+  if (!isStakeReady(lockedMatch)) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "STAKE_NOT_READY",
+        message: "Both players must stake on-chain before starting the game.",
+      },
+      { status: 400 },
+    );
+  }
+
   if (match.status !== "in_progress") {
     return NextResponse.json(
       {
@@ -123,6 +137,28 @@ export async function POST(req: NextRequest) {
       },
       { status: 400 },
     );
+  }
+
+  // ROUND PROGRESSION VALIDATION: Previous rounds must be completed
+  if (roundNumber > 1) {
+    const { data: previousRounds } = await supabase
+      .from("match_rounds")
+      .select("round_number, phase")
+      .eq("match_id", matchId)
+      .lt("round_number", roundNumber)
+      .order("round_number", { ascending: false });
+
+    const incompleteRounds = previousRounds?.filter((r) => r.phase !== "done");
+    if (incompleteRounds && incompleteRounds.length > 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "ROUND_PROGRESSION_ERROR",
+          message: `Previous rounds must be completed first. Round ${incompleteRounds[0].round_number} is still ${incompleteRounds[0].phase}.`,
+        },
+        { status: 400 },
+      );
+    }
   }
 
   // Check if round exists, create if not
@@ -173,6 +209,35 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
+  }
+
+  // Validate commit hash format (must be hex string starting with 0x)
+  if (!commitHash.startsWith("0x") || commitHash.length !== 66) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "BAD_REQUEST",
+        message: "Invalid commitHash format. Must be hex string (0x...) with 32 bytes (66 chars total).",
+      },
+      { status: 400 },
+    );
+  }
+
+  // Reject placeholder patterns (all zeros, repeated patterns, etc.)
+  const hashWithoutPrefix = commitHash.slice(2).toLowerCase();
+  const isAllZeros = /^0+$/.test(hashWithoutPrefix);
+  const isRepeatedPattern = /^([0-9a-f]{2})\1{15}$/.test(hashWithoutPrefix); // e.g., 0x01010101...
+  const isSequential = /^(01234567|abcdef|fedcba|0123|abcd)/i.test(hashWithoutPrefix);
+
+  if (isAllZeros || isRepeatedPattern || isSequential) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "INVALID_COMMIT_HASH",
+        message: "Commit hash appears to be a placeholder. You must generate a real hash from keccak256(move || salt) where move is 1-3 and salt is random 32 bytes. Example: move=1, salt=randomBytes(32), hash=keccak256([move, ...salt]).",
+      },
+      { status: 400 },
+    );
   }
 
   // Convert hex string to bytea
