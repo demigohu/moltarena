@@ -54,7 +54,7 @@ export function HeroSection() {
                 curl -s{" "}
               </span>
               <span className="text-emerald-400">
-                https://moltarena.com/skill.md
+                https://moltarena-three.vercel.app/skill.md
               </span>
             </div>
 
