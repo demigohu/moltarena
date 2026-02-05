@@ -1,13 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMoltbookAuth } from "@/app/api/_lib/moltArenaAuth";
-import {
-  publicClient,
-  RPS_ARENA_ADDRESS,
-  RPS_ARENA_ABI,
-} from "@/app/api/_lib/monadClient";
+import { supabase } from "@/app/api/_lib/supabase";
 
+// Legacy endpoint kept for backwards compatibility.
+// Now reads from Supabase instead of the on-chain contract.
 export async function GET(req: NextRequest) {
-  // Auth is mainly for rate limiting and per-agent stats later.
   try {
     requireMoltbookAuth(req);
   } catch (err) {
@@ -19,10 +16,10 @@ export async function GET(req: NextRequest) {
   }
 
   const { searchParams } = new URL(req.url);
-  const matchIdStr = searchParams.get("matchId");
+  const matchId = searchParams.get("matchId");
   const playerAddr = searchParams.get("player") ?? undefined;
 
-  if (!matchIdStr) {
+  if (!matchId) {
     return NextResponse.json(
       {
         success: false,
@@ -33,218 +30,144 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  let matchId: bigint;
-  try {
-    matchId = BigInt(matchIdStr);
-  } catch {
+  const { data: match, error: matchError } = await supabase
+    .from("matches")
+    .select(
+      "id, status, stake, best_of, player1_address, player2_address, wins1, wins2, winner_address",
+    )
+    .eq("id", matchId)
+    .single();
+
+  if (matchError || !match) {
     return NextResponse.json(
       {
         success: false,
-        error: "BAD_REQUEST",
-        message:
-          "Invalid 'matchId'. Use the on-chain matchId as a decimal string.",
+        error: "NOT_FOUND",
+        message: "Match not found.",
       },
-      { status: 400 },
+      { status: 404 },
     );
   }
 
-  try {
-    const match = await publicClient.readContract({
-      address: RPS_ARENA_ADDRESS,
-      abi: RPS_ARENA_ABI,
-      functionName: "getMatch",
-      args: [matchId],
-    });
+  const { data: rounds, error: roundsError } = await supabase
+    .from("match_rounds")
+    .select(
+      "round_number, phase, commit_deadline, reveal_deadline, move1, move2, result",
+    )
+    .eq("match_id", matchId)
+    .order("round_number", { ascending: true });
 
-    const [
-      player1,
-      player2,
-      wager,
-      roundsPlayed,
-      wins1,
-      wins2,
-      status,
-      settled,
-    ] = match as readonly [
-      string,
-      string,
-      bigint,
-      number,
-      number,
-      number,
-      number,
-      boolean,
-    ];
-
-    if (player1 === "0x0000000000000000000000000000000000000000") {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "NOT_FOUND",
-          message: "Match not found on-chain.",
-        },
-        { status: 404 },
-      );
-    }
-
-    // Read rounds to determine current phase and next action.
-    const rounds = [];
-    for (let r = 1; r <= 5; r++) {
-      // eslint-disable-next-line no-await-in-loop
-      const round = await publicClient.readContract({
-        address: RPS_ARENA_ADDRESS,
-        abi: RPS_ARENA_ABI,
-        functionName: "rounds",
-        args: [matchId, r],
-      });
-
-      const [
-        commit1,
-        commit2,
-        move1,
-        move2,
-        commitDeadline,
-        revealDeadline,
-        revealed1,
-        revealed2,
-        decided,
-      ] = round as readonly [
-        `0x${string}`,
-        `0x${string}`,
-        number,
-        number,
-        bigint,
-        bigint,
-        boolean,
-        boolean,
-        boolean,
-      ];
-
-      rounds.push({
-        round: r,
-        commit1,
-        commit2,
-        move1,
-        move2,
-        commitDeadline: Number(commitDeadline),
-        revealDeadline: Number(revealDeadline),
-        revealed1,
-        revealed2,
-        decided,
-      });
-    }
-
-    const nowSec = Math.floor(Date.now() / 1000);
-
-    let phase:
-      | "finished"
-      | "waiting_commit"
-      | "waiting_reveal"
-      | "waiting_next_round" = "waiting_next_round";
-    let currentRound = 0;
-    let timeRemainingMs: number | null = null;
-
-    if (settled || status === 2 /* MatchStatus.Finished */) {
-      phase = "finished";
-    } else {
-      // Find first undecided round
-      const undecided = rounds.find((r) => !r.decided);
-      if (!undecided) {
-        phase = "finished";
-      } else {
-        currentRound = undecided.round;
-        const r = undecided;
-
-        const hasCommit1 = r.commit1 !== "0x0000000000000000000000000000000000000000000000000000000000000000";
-        const hasCommit2 = r.commit2 !== "0x0000000000000000000000000000000000000000000000000000000000000000";
-
-        if (!hasCommit1 || !hasCommit2) {
-          phase = "waiting_commit";
-          if (r.commitDeadline > 0) {
-            timeRemainingMs = Math.max(0, (r.commitDeadline - nowSec) * 1000);
-          }
-        } else if (!r.revealed1 || !r.revealed2) {
-          phase = "waiting_reveal";
-          if (r.revealDeadline > 0) {
-            timeRemainingMs = Math.max(0, (r.revealDeadline - nowSec) * 1000);
-          }
-        } else {
-          phase = "waiting_next_round";
-        }
-      }
-    }
-
-    let role: "player1" | "player2" | "unknown" = "unknown";
-    if (playerAddr) {
-      const lower = playerAddr.toLowerCase();
-      if (lower === player1.toLowerCase()) role = "player1";
-      else if (lower === player2.toLowerCase()) role = "player2";
-    }
-
-    const you =
-      role === "player1"
-        ? { address: player1, wins: wins1 }
-        : role === "player2"
-          ? { address: player2, wins: wins2 }
-          : null;
-
-    const opponent =
-      role === "player1"
-        ? { address: player2, wins: wins2 }
-        : role === "player2"
-          ? { address: player1, wins: wins1 }
-          : null;
-
-    let should:
-      | "commit"
-      | "reveal"
-      | "wait"
-      | "claim_timeout_commit"
-      | "claim_timeout_reveal"
-      | null = null;
-
-    if (phase === "waiting_commit") {
-      should = "commit";
-    } else if (phase === "waiting_reveal") {
-      should = "reveal";
-    } else if (phase === "finished") {
-      should = "wait";
-    }
-
-    return NextResponse.json({
-      success: true,
-      matchId: matchIdStr,
-      phase,
-      currentRound,
-      timeRemainingMs,
-      role,
-      you,
-      opponent,
-      match: {
-        player1,
-        player2,
-        wager: wager.toString(),
-        roundsPlayed,
-        wins1,
-        wins2,
-        status,
-        settled,
-      },
-      actionHint: {
-        should,
-        allowedMoves: ["rock", "paper", "scissors"],
-      },
-    });
-  } catch (error) {
-    console.error("MoltArena match/current error", error);
+  if (roundsError) {
     return NextResponse.json(
       {
         success: false,
-        error: "INTERNAL_ERROR",
-        message: "Failed to read match state from chain.",
+        error: "DATABASE_ERROR",
+        message: "Failed to fetch rounds.",
       },
       { status: 500 },
     );
   }
+
+  const now = Date.now();
+  let phase:
+    | "finished"
+    | "waiting_commit"
+    | "waiting_reveal"
+    | "waiting_next_round" = "waiting_next_round";
+  let currentRound = 0;
+  let timeRemainingMs: number | null = null;
+
+  if (match.status === "finished") {
+    phase = "finished";
+  } else {
+    const undecided = (rounds ?? []).find((r) => r.phase !== "done");
+    if (!undecided) {
+      phase = "finished";
+    } else {
+      currentRound = undecided.round_number;
+      const r = undecided;
+
+      const hasMove1 = r.move1 !== null && r.move1 !== undefined;
+      const hasMove2 = r.move2 !== null && r.move2 !== undefined;
+
+      if (!hasMove1 || !hasMove2) {
+        phase = "waiting_commit";
+        if (r.commit_deadline) {
+          const deadline = new Date(r.commit_deadline).getTime();
+          timeRemainingMs = Math.max(0, deadline - now);
+        }
+      } else if (r.phase === "reveal") {
+        phase = "waiting_reveal";
+        if (r.reveal_deadline) {
+          const deadline = new Date(r.reveal_deadline).getTime();
+          timeRemainingMs = Math.max(0, deadline - now);
+        }
+      } else if (r.phase === "done") {
+        phase = "waiting_next_round";
+      }
+    }
+  }
+
+  let role: "player1" | "player2" | "unknown" = "unknown";
+  if (playerAddr) {
+    const lower = playerAddr.toLowerCase();
+    if (lower === match.player1_address.toLowerCase()) role = "player1";
+    else if (lower === match.player2_address?.toLowerCase()) role = "player2";
+  }
+
+  const you =
+    role === "player1"
+      ? { address: match.player1_address, wins: match.wins1 }
+      : role === "player2"
+        ? { address: match.player2_address, wins: match.wins2 }
+        : null;
+
+  const opponent =
+    role === "player1"
+      ? { address: match.player2_address, wins: match.wins2 }
+      : role === "player2"
+        ? { address: match.player1_address, wins: match.wins1 }
+        : null;
+
+  let should:
+    | "commit"
+    | "reveal"
+    | "wait"
+    | "claim_timeout_commit"
+    | "claim_timeout_reveal"
+    | null = null;
+
+  if (phase === "waiting_commit") {
+    should = "commit";
+  } else if (phase === "waiting_reveal") {
+    should = "reveal";
+  } else if (phase === "finished") {
+    should = "wait";
+  }
+
+  return NextResponse.json({
+    success: true,
+    matchId,
+    phase,
+    currentRound,
+    timeRemainingMs,
+    role,
+    you,
+    opponent,
+    match: {
+      player1: match.player1_address,
+      player2: match.player2_address,
+      wager: match.stake,
+      roundsPlayed: rounds?.length ?? 0,
+      wins1: match.wins1,
+      wins2: match.wins2,
+      status: match.status,
+      settled: match.status === "finished",
+    },
+    actionHint: {
+      should,
+      allowedMoves: ["rock", "paper", "scissors"],
+    },
+  });
 }
 

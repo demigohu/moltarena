@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { mockAgents } from '@/lib/mock-data'
 
 type SortBy = 'winRate' | 'profit' | 'matches' | 'streak'
 
@@ -17,12 +16,26 @@ type ApiLeaderboardItem = {
   totalWagered: number
 }
 
-type LeaderboardAgent = (typeof mockAgents)[number]
+type LeaderboardAgent = {
+  id: string
+  name: string
+  strategy: string
+  riskLevel: string
+  walletAddress: string
+  totalWins: number
+  totalLosses: number
+  totalMatches: number
+  totalProfit: number
+  averageWager: number
+  currentStreak: number
+  riskScore: number
+  winRate: number
+}
 
 export function FullLeaderboard() {
   const [sortBy, setSortBy] = useState<SortBy>('winRate')
   const [filterStrategy, setFilterStrategy] = useState<string | null>(null)
-  const [agents, setAgents] = useState<LeaderboardAgent[]>(mockAgents)
+  const [agents, setAgents] = useState<LeaderboardAgent[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -34,7 +47,10 @@ export function FullLeaderboard() {
         const res = await fetch('/api/leaderboard')
         if (!res.ok) throw new Error(`Request failed with status ${res.status}`)
         const json = await res.json()
-        if (!json?.success || !Array.isArray(json.leaderboard)) return
+        if (!json?.success || !Array.isArray(json.leaderboard)) {
+          setAgents([])
+          return
+        }
 
         const mapped: LeaderboardAgent[] = json.leaderboard.map((p: ApiLeaderboardItem, idx: number) => {
           const games = p.matches || p.wins + p.losses + p.draws || 0
@@ -56,12 +72,11 @@ export function FullLeaderboard() {
           }
         })
 
-        if (mapped.length > 0) {
-          setAgents(mapped)
-        }
+        setAgents(mapped)
       } catch (err) {
         console.error('Failed to load leaderboard', err)
-        setError('Failed to load live leaderboard. Showing sample data.')
+        setError('Failed to load leaderboard.')
+        setAgents([])
       } finally {
         setIsLoading(false)
       }
@@ -140,22 +155,37 @@ export function FullLeaderboard() {
       </div>
 
       {/* Leaderboard Table */}
-      <div className="overflow-x-auto border border-border">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-border bg-muted/50">
-              <th className="text-left py-4 px-6 font-semibold">Rank</th>
-              <th className="text-left py-4 px-6 font-semibold">Agent</th>
-              <th className="text-left py-4 px-6 font-semibold">Strategy</th>
-              <th className="text-left py-4 px-6 font-semibold">Matches</th>
-              <th className="text-right py-4 px-6 font-semibold">W/L</th>
-              <th className="text-right py-4 px-6 font-semibold">Win Rate</th>
-              <th className="text-right py-4 px-6 font-semibold">Total Profit</th>
-              <th className="text-right py-4 px-6 font-semibold">Streak</th>
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((agent, index) => (
+      {isLoading && (
+        <p className="mb-4 text-sm text-muted-foreground">Loading leaderboard...</p>
+      )}
+      {error && (
+        <p className="mb-4 text-sm text-muted-foreground">
+          {error}
+        </p>
+      )}
+      {!isLoading && !error && agents.length === 0 && (
+        <p className="mb-4 text-sm text-muted-foreground">
+          No agents on leaderboard yet. Be the first to play!
+        </p>
+      )}
+
+      {agents.length > 0 && (
+        <div className="overflow-x-auto border border-border">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border bg-muted/50">
+                <th className="text-left py-4 px-6 font-semibold">Rank</th>
+                <th className="text-left py-4 px-6 font-semibold">Agent</th>
+                <th className="text-left py-4 px-6 font-semibold">Strategy</th>
+                <th className="text-left py-4 px-6 font-semibold">Matches</th>
+                <th className="text-right py-4 px-6 font-semibold">W/L</th>
+                <th className="text-right py-4 px-6 font-semibold">Win Rate</th>
+                <th className="text-right py-4 px-6 font-semibold">Total Profit</th>
+                <th className="text-right py-4 px-6 font-semibold">Streak</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((agent, index) => (
               <tr key={agent.id} className="border-b border-border hover:bg-muted/50 transition-colors">
                 <td className="py-4 px-6 font-semibold">{index + 1}</td>
                 <td className="py-4 px-6">
@@ -188,27 +218,16 @@ export function FullLeaderboard() {
                   </span>
                 </td>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {sorted.length === 0 && (
-        <div className="text-center py-12">
-          <p className="text-muted-foreground">No agents found matching your filters.</p>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
-      {error && (
-        <p className="mt-4 text-sm text-muted-foreground">
-          {error}
-        </p>
-      )}
-
-      {isLoading && (
-        <p className="mt-4 text-sm text-muted-foreground">
-          Loading live leaderboard...
-        </p>
+      {sorted.length === 0 && agents.length > 0 && (
+        <div className="text-center py-12">
+          <p className="text-muted-foreground">No agents found matching your filters.</p>
+        </div>
       )}
     </section>
   )

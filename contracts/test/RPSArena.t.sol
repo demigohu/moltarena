@@ -7,206 +7,177 @@ import "../src/RPSArena.sol";
 contract RPSArenaTest is Test {
     RPSArena arena;
 
-    address player1 = address(0xA1);
-    address player2 = address(0xB2);
+    uint256 private pk1 = 0xA11CE;
+    uint256 private pk2 = 0xB0B;
+    address private player1;
+    address private player2;
 
-    uint256 constant WAGER = 1 ether;
+    bytes32 private constant MATCH_RESULT_TYPEHASH = keccak256(
+        "MatchResult(bytes32 matchId,address player1,address player2,address winner,uint256 stake,uint8 bestOf,uint8 wins1,uint8 wins2,bytes32 transcriptHash,uint256 nonce)"
+    );
 
     function setUp() public {
         arena = new RPSArena();
+
+        // Ignore gas cost in balance assertions.
+        vm.txGasPrice(0);
+
+        player1 = vm.addr(pk1);
+        player2 = vm.addr(pk2);
 
         vm.deal(player1, 10 ether);
         vm.deal(player2, 10 ether);
     }
 
-    function _computeCommit(
-        uint256 matchId,
-        uint8 round,
-        address player,
-        RPSArena.Move move,
-        bytes32 salt
-    ) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(matchId, round, player, move, salt));
+    // ------------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------------
+
+    function _domainSeparator() internal view returns (bytes32) {
+        // Must mirror EIP712("RPSArena", "2") in the contract
+        bytes32 typeHash = keccak256(
+            "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+        );
+        return keccak256(
+            abi.encode(
+                typeHash,
+                keccak256(bytes("RPSArena")),
+                keccak256(bytes("2")),
+                block.chainid,
+                address(arena)
+            )
+        );
     }
 
-    function test_EnqueueAndCreateMatch() public {
+    function _signMatchResult(
+        uint256 pk,
+        RPSArena.MatchResult memory result
+    ) internal view returns (bytes memory) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                MATCH_RESULT_TYPEHASH,
+                result.matchId,
+                result.player1,
+                result.player2,
+                result.winner,
+                result.stake,
+                result.bestOf,
+                result.wins1,
+                result.wins2,
+                result.transcriptHash,
+                result.nonce
+            )
+        );
+
+        bytes32 digest = keccak256(
+            abi.encodePacked("\x19\x01", _domainSeparator(), structHash)
+        );
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    // ------------------------------------------------------------------------
+    // Tests
+    // ------------------------------------------------------------------------
+
+    function testStakeForMatch_FirstAndSecondPlayer() public {
+        bytes32 matchId = keccak256("match-1");
+
+        // First player stakes exactly MIN_STAKE
+        uint256 stake = arena.MIN_STAKE();
         vm.prank(player1);
-        uint256 matchId1 = arena.enqueue{value: WAGER}(WAGER);
-        assertEq(matchId1, 0, "first enqueue should not create match");
+        arena.stakeForMatch{value: stake}(matchId);
 
+        // Second player must stake the same amount
         vm.prank(player2);
-        uint256 matchId2 = arena.enqueue{value: WAGER}(WAGER);
-        assertEq(matchId2, 1, "second enqueue should create match 1");
+        arena.stakeForMatch{value: stake}(matchId);
 
-        (
-            address p1,
-            address p2,
-            uint256 wager,
-            uint8 roundsPlayed,
-            uint8 wins1,
-            uint8 wins2,
-            RPSArena.MatchStatus status,
-            bool settled
-        ) = arena.getMatch(matchId2);
+        (address p1, address p2, uint256 lockedStake, bool p1Locked, bool p2Locked, ) = arena.lockedMatches(matchId);
 
         assertEq(p1, player1);
         assertEq(p2, player2);
-        assertEq(wager, WAGER);
-        assertEq(roundsPlayed, 0);
-        assertEq(wins1, 0);
-        assertEq(wins2, 0);
-        assertEq(uint8(status), uint8(RPSArena.MatchStatus.WaitingCommits));
-        assertFalse(settled);
+        assertEq(lockedStake, arena.MIN_STAKE());
     }
 
-    function test_FullMatch_Player1Wins3to0() public {
-        // Enqueue and create match
+    function testSettleMatch_Player1Wins() public {
+        bytes32 matchId = keccak256("match-2");
+        uint256 stake = arena.MIN_STAKE();
+
+        uint256 startBal1 = player1.balance;
+        uint256 startBal2 = player2.balance;
+
+        // Both players stake
         vm.prank(player1);
-        arena.enqueue{value: WAGER}(WAGER);
+        arena.stakeForMatch{value: stake}(matchId);
 
         vm.prank(player2);
-        uint256 matchId = arena.enqueue{value: WAGER}(WAGER);
+        arena.stakeForMatch{value: stake}(matchId);
 
-        // Round 1: player1 Rock, player2 Scissors (p1 win)
-        _playRound(matchId, 1, RPSArena.Move.Rock, RPSArena.Move.Scissors);
+        // Off-chain decided result: best-of-5, player1 wins 3-1
+        RPSArena.MatchResult memory result = RPSArena.MatchResult({
+            matchId: matchId,
+            player1: player1,
+            player2: player2,
+            winner: player1,
+            stake: stake,
+            bestOf: arena.DEFAULT_BEST_OF(),
+            wins1: 3,
+            wins2: 1,
+            transcriptHash: keccak256("transcript-2"),
+            nonce: 1
+        });
 
-        // Round 2: player1 Paper, player2 Rock (p1 win)
-        _playRound(matchId, 2, RPSArena.Move.Paper, RPSArena.Move.Rock);
+        bytes memory sig1 = _signMatchResult(pk1, result);
+        bytes memory sig2 = _signMatchResult(pk2, result);
 
-        // Round 3: player1 Scissors, player2 Paper (p1 win, match finishes)
-        _playRound(matchId, 3, RPSArena.Move.Scissors, RPSArena.Move.Paper);
+        arena.settleMatch(result, sig1, sig2);
 
-        (
-            ,
-            ,
-            ,
-            uint8 roundsPlayed,
-            uint8 wins1,
-            uint8 wins2,
-            RPSArena.MatchStatus status,
-            bool settled
-        ) = arena.getMatch(matchId);
-
-        assertEq(wins1, 3);
-        assertEq(wins2, 0);
-        assertEq(roundsPlayed, 3);
-        assertEq(uint8(status), uint8(RPSArena.MatchStatus.Finished));
-        assertTrue(settled);
-
-        // Contract should have no leftover funds and player1 should receive pot
+        // Player1 should end up +stake net; player2 ends up -stake.
+        assertEq(player1.balance, startBal1 + stake);
+        assertEq(player2.balance, startBal2 - stake);
         assertEq(address(arena).balance, 0);
-        assertEq(player1.balance, 10 ether - WAGER + 2 * WAGER);
-        assertEq(player2.balance, 10 ether - WAGER);
+
+        // Match cannot be settled twice
+        vm.expectRevert(RPSArena.MatchAlreadySettled.selector);
+        arena.settleMatch(result, sig1, sig2);
     }
 
-    function test_DrawMatch_RefundsBoth() public {
+    function testSettleMatch_DrawRefundsBoth() public {
+        bytes32 matchId = keccak256("match-3");
+        uint256 stake = arena.MIN_STAKE();
+
+        uint256 startBal1 = player1.balance;
+        uint256 startBal2 = player2.balance;
+
         vm.prank(player1);
-        arena.enqueue{value: WAGER}(WAGER);
+        arena.stakeForMatch{value: stake}(matchId);
 
         vm.prank(player2);
-        uint256 matchId = arena.enqueue{value: WAGER}(WAGER);
+        arena.stakeForMatch{value: stake}(matchId);
 
-        // Play 5 draw rounds (both choose Rock)
-        for (uint8 r = 1; r <= 5; r++) {
-            _playRound(matchId, r, RPSArena.Move.Rock, RPSArena.Move.Rock);
-        }
+        // Draw: wins equal, winner = address(0)
+        RPSArena.MatchResult memory result = RPSArena.MatchResult({
+            matchId: matchId,
+            player1: player1,
+            player2: player2,
+            winner: address(0),
+            stake: stake,
+            bestOf: arena.DEFAULT_BEST_OF(),
+            wins1: 2,
+            wins2: 2,
+            transcriptHash: keccak256("transcript-3"),
+            nonce: 7
+        });
 
-        (
-            ,
-            ,
-            ,
-            uint8 roundsPlayed,
-            uint8 wins1,
-            uint8 wins2,
-            RPSArena.MatchStatus status,
-            bool settled
-        ) = arena.getMatch(matchId);
+        bytes memory sig1 = _signMatchResult(pk1, result);
+        bytes memory sig2 = _signMatchResult(pk2, result);
 
-        assertEq(roundsPlayed, 5);
-        assertEq(wins1, 0);
-        assertEq(wins2, 0);
-        assertEq(uint8(status), uint8(RPSArena.MatchStatus.Finished));
-        assertTrue(settled);
+        arena.settleMatch(result, sig1, sig2);
 
-        // Both should have their wager refunded
-        assertEq(player1.balance, 10 ether);
-        assertEq(player2.balance, 10 ether);
+        // Both get their stake back
+        assertEq(player1.balance, startBal1);
+        assertEq(player2.balance, startBal2);
         assertEq(address(arena).balance, 0);
-    }
-
-    function test_CommitTimeout_GivesRoundWinOnly() public {
-        vm.prank(player1);
-        arena.enqueue{value: WAGER}(WAGER);
-
-        vm.prank(player2);
-        uint256 matchId = arena.enqueue{value: WAGER}(WAGER);
-
-        // Only player1 commits for round 1
-        bytes32 salt1 = keccak256("salt1");
-        bytes32 commit1 = _computeCommit(
-            matchId,
-            1,
-            player1,
-            RPSArena.Move.Rock,
-            salt1
-        );
-
-        vm.prank(player1);
-        arena.commitMove(matchId, 1, commit1);
-
-        // Fast forward past commit deadline
-        vm.warp(block.timestamp + 61);
-
-        // Anyone can claim timeout; use player1
-        vm.prank(player1);
-        arena.claimCommitTimeout(matchId, 1);
-
-        (
-            ,
-            ,
-            ,
-            uint8 roundsPlayed,
-            uint8 wins1,
-            uint8 wins2,
-            RPSArena.MatchStatus status,
-            bool settled
-        ) = arena.getMatch(matchId);
-
-        assertEq(roundsPlayed, 1);
-        assertEq(wins1, 1);
-        assertEq(wins2, 0);
-        assertEq(uint8(status), uint8(RPSArena.MatchStatus.WaitingCommits));
-        assertFalse(settled);
-    }
-
-    // ---------------------------------------------------------------------
-    // Helpers
-    // ---------------------------------------------------------------------
-
-    function _playRound(
-        uint256 matchId,
-        uint8 round,
-        RPSArena.Move move1,
-        RPSArena.Move move2
-    ) internal {
-        bytes32 salt1 = keccak256(abi.encodePacked("salt", matchId, round, "p1"));
-        bytes32 salt2 = keccak256(abi.encodePacked("salt", matchId, round, "p2"));
-
-        bytes32 commit1 = _computeCommit(matchId, round, player1, move1, salt1);
-        bytes32 commit2 = _computeCommit(matchId, round, player2, move2, salt2);
-
-        vm.prank(player1);
-        arena.commitMove(matchId, round, commit1);
-
-        vm.prank(player2);
-        arena.commitMove(matchId, round, commit2);
-
-        // Immediately reveal both (within timeout)
-        vm.prank(player1);
-        arena.revealMove(matchId, round, move1, salt1);
-
-        vm.prank(player2);
-        arena.revealMove(matchId, round, move2, salt2);
     }
 }
-

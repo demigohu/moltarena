@@ -3,17 +3,26 @@
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { mockOngoingMatches } from '@/lib/mock-data'
 
 type Move = 'rock' | 'paper' | 'scissors'
 
 const moves: Move[] = ['rock', 'paper', 'scissors']
+const ROUND_DURATION_SECONDS = 60
 
 type LiveMatchApi = {
   matchId: string
-  player1: string
-  player2: string
-  wager: number
+  status: string
+  player1: {
+    address: string
+    name: string | null
+  }
+  player2: {
+    address: string
+    name: string | null
+  } | null
+  stake: number | string
+  wins1: number
+  wins2: number
   createdAt: number | string
 }
 
@@ -24,7 +33,7 @@ type UiMatch = {
   wagerAmount: number
 }
 
-function shorten(addr: string) {
+function shorten(addr: string | null | undefined) {
   if (!addr) return ''
   const s = addr.toString()
   if (s.length <= 10) return s
@@ -54,20 +63,14 @@ function moveToIcon(move: Move) {
 }
 
 export function OngoingMatches() {
-  const [matches, setMatches] = useState<UiMatch[]>(
-    mockOngoingMatches.map((m) => ({
-      id: m.id,
-      player1: m.agent1.name,
-      player2: m.agent2.name,
-      wagerAmount: m.wagerAmount,
-    })),
-  )
+  const [matches, setMatches] = useState<UiMatch[]>([])
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null)
   const [agent1Move, setAgent1Move] = useState<Move>('rock')
   const [agent2Move, setAgent2Move] = useState<Move>('scissors')
   const [result, setResult] = useState<'agent1' | 'agent2' | 'draw'>('agent1')
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [roundProgress, setRoundProgress] = useState(0)
 
   useEffect(() => {
     const fetchLive = async () => {
@@ -79,33 +82,44 @@ export function OngoingMatches() {
 
         const mapped: UiMatch[] = json.matches.map((m: LiveMatchApi) => ({
           id: String(m.matchId),
-          player1: shorten(m.player1),
-          player2: shorten(m.player2),
-          wagerAmount: Number(m.wager ?? 0),
+          player1: m.player1?.name || shorten(m.player1?.address) || 'Player 1',
+          player2: m.player2
+            ? m.player2.name || shorten(m.player2.address) || 'Player 2'
+            : 'Waiting for opponent',
+          wagerAmount: Number(m.stake ?? 0),
         }))
 
+        setMatches(mapped)
         if (mapped.length > 0) {
-          setMatches(mapped)
           setSelectedMatchId(mapped[0].id)
+        } else {
+          setSelectedMatchId(null)
         }
       } catch (err) {
         console.error('Failed to load live matches', err)
-        setError('Failed to load live matches. Showing sample data.')
+        setError('Failed to load live matches.')
+        setMatches([])
+        setSelectedMatchId(null)
       }
     }
 
     void fetchLive()
   }, [])
 
+  // simple looping round timer (~60s) just for visualising time pressure
+  useEffect(() => {
+    const start = Date.now()
+    const interval = setInterval(() => {
+      const elapsedSeconds = (Date.now() - start) / 1000
+      const pct = ((elapsedSeconds % ROUND_DURATION_SECONDS) / ROUND_DURATION_SECONDS) * 100
+      setRoundProgress(pct)
+    }, 500)
+    return () => clearInterval(interval)
+  }, [])
+
   const selectedMatch =
     matches.find((m) => m.id === selectedMatchId) ??
-    matches[0] ??
-    {
-      id: mockOngoingMatches[0].id,
-      player1: mockOngoingMatches[0].agent1.name,
-      player2: mockOngoingMatches[0].agent2.name,
-      wagerAmount: mockOngoingMatches[0].wagerAmount,
-    }
+    (matches.length > 0 ? matches[0] : null)
 
   const handleSelectMatch = (id: string) => {
     setSelectedMatchId(id)
@@ -145,7 +159,9 @@ export function OngoingMatches() {
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="mb-12">
           <h2 className="text-3xl font-semibold tracking-wider mb-2">Live Matches</h2>
-          <p className="text-muted-foreground">Ongoing tournaments in real-time</p>
+          <p className="text-muted-foreground">
+            Ongoing tournaments in real-time with ~60s round timers
+          </p>
         </div>
 
         {error && (
@@ -154,16 +170,23 @@ export function OngoingMatches() {
           </p>
         )}
 
+        {!error && matches.length === 0 && (
+          <p className="mb-6 text-sm text-muted-foreground">
+            No live matches right now. Check back soon.
+          </p>
+        )}
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {matches.map((match) => {
-            const isSelected = match.id === selectedMatchId || (!selectedMatchId && match.id === selectedMatch.id)
+            const isSelected =
+              match.id === selectedMatchId || (!selectedMatchId && selectedMatch && match.id === selectedMatch.id)
 
             return (
               <button
                 key={match.id}
                 type="button"
                 onClick={() => handleSelectMatch(match.id)}
-                className={`text-left border p-6 hover:bg-muted/60 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/70 ${
+                className={`text-left border p-6 hover:bg-muted/60 transition-colors transform hover:-translate-y-1 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/70 ${
                   isSelected ? 'border-primary shadow-md bg-muted/60' : 'border-border'
                 }`}
               >
@@ -199,6 +222,18 @@ export function OngoingMatches() {
                 <div className="flex items-center justify-between text-xs">
                   <span className="text-muted-foreground">Best-of-5</span>
                   <span className="text-muted-foreground">Match ID: {match.id.toString().slice(0, 8)}</span>
+                </div>
+                <div className="mt-3">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-1">
+                    <span>Round timer</span>
+                    <span>~60s</span>
+                  </div>
+                  <div className="h-1.5 w-full bg-muted overflow-hidden rounded-full">
+                    <div
+                      className="h-full bg-primary transition-all"
+                      style={{ width: `${roundProgress}%` }}
+                    />
+                  </div>
                 </div>
               </button>
             )

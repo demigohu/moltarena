@@ -1,9 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  publicClient,
-  RPS_ARENA_ADDRESS,
-  RPS_ARENA_ABI,
-} from "@/app/api/_lib/monadClient";
+import { supabase } from "@/app/api/_lib/supabase";
 
 type RouteContext = {
   params: Promise<{
@@ -11,139 +7,92 @@ type RouteContext = {
   }>;
 };
 
+// Public viewer endpoint: fetch match + rounds from Supabase by UUID.
 export async function GET(_req: NextRequest, context: RouteContext) {
   const { id } = await context.params;
 
-  let matchId: bigint;
-  try {
-    matchId = BigInt(id);
-  } catch {
+  // Basic UUID validation
+  if (!id || id.length < 10) {
     return NextResponse.json(
       {
         success: false,
         error: "BAD_REQUEST",
-        message:
-          "Invalid match id. Use the on-chain matchId as a decimal string.",
+        message: "Invalid match id. Expected Supabase match UUID.",
       },
       { status: 400 },
     );
   }
 
-  try {
-    // Read basic match info
-    const match = await publicClient.readContract({
-      address: RPS_ARENA_ADDRESS,
-      abi: RPS_ARENA_ABI,
-      functionName: "getMatch",
-      args: [matchId],
-    });
+  // Fetch match
+  const { data: match, error: matchError } = await supabase
+    .from("matches")
+    .select(
+      "id, status, stake, best_of, player1_address, player2_address, player1_name, player2_name, wins1, wins2, winner_address, created_at",
+    )
+    .eq("id", id)
+    .single();
 
-    const [
-      player1,
-      player2,
-      wager,
-      roundsPlayed,
-      wins1,
-      wins2,
-      status,
-      settled,
-    ] = match as readonly [
-      string,
-      string,
-      bigint,
-      number,
-      number,
-      number,
-      number,
-      boolean,
-    ];
-
-    if (player1 === "0x0000000000000000000000000000000000000000") {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "NOT_FOUND",
-          message: "Match not found on-chain.",
-        },
-        { status: 404 },
-      );
-    }
-
-    // Read per-round info (1..5)
-    const rounds = [];
-    for (let r = 1; r <= 5; r++) {
-      // eslint-disable-next-line no-await-in-loop
-      const round = await publicClient.readContract({
-        address: RPS_ARENA_ADDRESS,
-        abi: RPS_ARENA_ABI,
-        functionName: "rounds",
-        args: [matchId, r],
-      });
-
-      const [
-        commit1,
-        commit2,
-        move1,
-        move2,
-        commitDeadline,
-        revealDeadline,
-        revealed1,
-        revealed2,
-        decided,
-      ] = round as readonly [
-        `0x${string}`,
-        `0x${string}`,
-        number,
-        number,
-        bigint,
-        bigint,
-        boolean,
-        boolean,
-        boolean,
-      ];
-
-      rounds.push({
-        round: r,
-        commit1,
-        commit2,
-        move1,
-        move2,
-        commitDeadline: Number(commitDeadline),
-        revealDeadline: Number(revealDeadline),
-        revealed1,
-        revealed2,
-        decided,
-      });
-    }
-
-    return NextResponse.json({
-      success: true,
-      matchId: id,
-      onchain: {
-        contract: RPS_ARENA_ADDRESS,
-      },
-      match: {
-        player1,
-        player2,
-        wager: wager.toString(),
-        roundsPlayed,
-        wins1,
-        wins2,
-        status,
-        settled,
-      },
-      rounds,
-    });
-  } catch (error) {
-    console.error("MoltArena match detail error", error);
+  if (matchError || !match) {
     return NextResponse.json(
       {
         success: false,
-        error: "INTERNAL_ERROR",
-        message: "Failed to read match from chain.",
+        error: "NOT_FOUND",
+        message: "Match not found.",
+      },
+      { status: 404 },
+    );
+  }
+
+  // Fetch rounds
+  const { data: rounds, error: roundsError } = await supabase
+    .from("match_rounds")
+    .select(
+      "round_number, phase, move1, move2, result, commit_deadline, reveal_deadline",
+    )
+    .eq("match_id", id)
+    .order("round_number", { ascending: true });
+
+  if (roundsError) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "DATABASE_ERROR",
+        message: "Failed to fetch match rounds.",
       },
       { status: 500 },
     );
   }
+
+  return NextResponse.json({
+    success: true,
+    matchId: id,
+    match: {
+      id: match.id,
+      status: match.status,
+      stake: match.stake,
+      bestOf: match.best_of,
+      player1: {
+        address: match.player1_address,
+        name: match.player1_name,
+      },
+      player2: {
+        address: match.player2_address,
+        name: match.player2_name,
+      },
+      wins1: match.wins1,
+      wins2: match.wins2,
+      winner: match.winner_address,
+      createdAt: match.created_at,
+    },
+    rounds: (rounds ?? []).map((r) => ({
+      roundNumber: r.round_number,
+      phase: r.phase,
+      move1: r.move1,
+      move2: r.move2,
+      result: r.result,
+      commitDeadline: r.commit_deadline,
+      revealDeadline: r.reveal_deadline,
+    })),
+  });
 }
 

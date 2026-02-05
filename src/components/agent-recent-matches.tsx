@@ -2,7 +2,6 @@
 
 import type { Agent } from '@/lib/types'
 import { useEffect, useState } from 'react'
-import { mockMatchHistory } from '@/lib/mock-data'
 import type { MatchHistory as MatchHistoryItem } from '@/lib/types'
 
 type HistoryApiItem = {
@@ -20,13 +19,13 @@ interface AgentRecentMatchesProps {
 }
 
 export function AgentRecentMatches({ agent }: AgentRecentMatchesProps) {
-  const [history, setHistory] = useState<MatchHistoryItem[]>(mockMatchHistory)
+  const [history, setHistory] = useState<MatchHistoryItem[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!agent.walletAddress) {
-      setHistory(mockMatchHistory)
+      setHistory([])
       return
     }
 
@@ -39,16 +38,15 @@ export function AgentRecentMatches({ agent }: AgentRecentMatchesProps) {
         if (!res.ok) throw new Error(`Request failed with status ${res.status}`)
         const json = await res.json()
         if (!json?.success || !Array.isArray(json.history)) {
-          setHistory(mockMatchHistory)
+          setHistory([])
           return
         }
 
         const mapped: MatchHistoryItem[] = json.history.map((h: HistoryApiItem, idx: number) => ({
           id: h.matchId ?? String(idx),
           opponent: {
-            ...mockMatchHistory[0].opponent,
-            name: h.opponent,
-            walletAddress: h.opponent,
+            name: h.opponent || 'Unknown',
+            walletAddress: h.opponent || '',
           },
           result: h.result,
           wager: h.wager,
@@ -58,15 +56,11 @@ export function AgentRecentMatches({ agent }: AgentRecentMatchesProps) {
           timestamp: new Date(h.finishedAt),
         }))
 
-        if (mapped.length > 0) {
-          setHistory(mapped)
-        } else {
-          setHistory(mockMatchHistory)
-        }
+        setHistory(mapped)
       } catch (err) {
         console.error('Failed to load agent match history', err)
-        setError('Failed to load live agent match history. Showing sample data.')
-        setHistory(mockMatchHistory)
+        setError('Failed to load match history.')
+        setHistory([])
       } finally {
         setIsLoading(false)
       }
@@ -98,22 +92,33 @@ export function AgentRecentMatches({ agent }: AgentRecentMatchesProps) {
           {error}
         </p>
       )}
+      {!agent.walletAddress && (
+        <p className="mb-4 text-sm text-muted-foreground">
+          Connect wallet to view match history.
+        </p>
+      )}
+      {!isLoading && !error && history.length === 0 && agent.walletAddress && (
+        <p className="mb-4 text-sm text-muted-foreground">
+          No match history yet. Play your first match to see results here.
+        </p>
+      )}
 
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-border">
-              <th className="text-left py-3 px-4 font-medium text-muted-foreground">Opponent</th>
-              <th className="text-left py-3 px-4 font-medium text-muted-foreground">Result</th>
-              <th className="text-left py-3 px-4 font-medium text-muted-foreground">Round Score</th>
-              <th className="text-right py-3 px-4 font-medium text-muted-foreground">Wager</th>
-              <th className="text-right py-3 px-4 font-medium text-muted-foreground">P/L</th>
-              <th className="text-left py-3 px-4 font-medium text-muted-foreground">Time</th>
-              <th className="text-left py-3 px-4 font-medium text-muted-foreground">Tx Hash</th>
-            </tr>
-          </thead>
-          <tbody>
-            {history.map((match) => (
+      {history.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-border">
+                <th className="text-left py-3 px-4 font-medium text-muted-foreground">Opponent</th>
+                <th className="text-left py-3 px-4 font-medium text-muted-foreground">Result</th>
+                <th className="text-left py-3 px-4 font-medium text-muted-foreground">Round Score</th>
+                <th className="text-right py-3 px-4 font-medium text-muted-foreground">Wager</th>
+                <th className="text-right py-3 px-4 font-medium text-muted-foreground">P/L</th>
+                <th className="text-left py-3 px-4 font-medium text-muted-foreground">Time</th>
+                <th className="text-left py-3 px-4 font-medium text-muted-foreground">Tx Hash</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((match) => (
               <tr key={match.id} className="border-b border-border hover:bg-muted/50 transition-colors">
                 <td className="py-3 px-4 font-medium">{match.opponent.name}</td>
                 <td className="py-3 px-4">
@@ -141,10 +146,11 @@ export function AgentRecentMatches({ agent }: AgentRecentMatchesProps) {
                   </a>
                 </td>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
   )
 }

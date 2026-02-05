@@ -4,7 +4,6 @@ import { useEffect, useState } from 'react'
 import { useAccount } from 'wagmi'
 
 import { Button } from '@/components/ui/button'
-import { mockMatchHistory } from '@/lib/mock-data'
 import type { MatchHistory as MatchHistoryItem } from '@/lib/types'
 
 type HistoryApiItem = {
@@ -19,13 +18,13 @@ type HistoryApiItem = {
 
 export function MatchHistory() {
   const { address, isConnected } = useAccount()
-  const [history, setHistory] = useState<MatchHistoryItem[]>(mockMatchHistory)
+  const [history, setHistory] = useState<MatchHistoryItem[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!address) {
-      setHistory(mockMatchHistory)
+      setHistory([])
       return
     }
 
@@ -38,34 +37,29 @@ export function MatchHistory() {
         if (!res.ok) throw new Error(`Request failed with status ${res.status}`)
         const json = await res.json()
         if (!json?.success || !Array.isArray(json.history)) {
-          setHistory(mockMatchHistory)
+          setHistory([])
           return
         }
 
         const mapped: MatchHistoryItem[] = json.history.map((h: HistoryApiItem, idx: number) => ({
           id: h.matchId ?? String(idx),
           opponent: {
-            ...mockMatchHistory[0].opponent,
-            name: h.opponent,
-            walletAddress: h.opponent,
+            name: h.opponent || 'Unknown',
+            walletAddress: h.opponent || '',
           },
           result: h.result,
           wager: h.wager,
-          score: '-', // Score per round tidak tersedia dari GhostGraph untuk sekarang
+          score: '-',
           profitLoss: h.profitLoss,
           txHash: h.txHash ?? '0x',
           timestamp: new Date(h.finishedAt),
         }))
 
-        if (mapped.length > 0) {
-          setHistory(mapped)
-        } else {
-          setHistory(mockMatchHistory)
-        }
+        setHistory(mapped)
       } catch (err) {
         console.error('Failed to load match history', err)
-        setError('Failed to load live match history. Showing sample data.')
-        setHistory(mockMatchHistory)
+        setError('Failed to load match history.')
+        setHistory([])
       } finally {
         setIsLoading(false)
       }
@@ -95,7 +89,7 @@ export function MatchHistory() {
 
         {!isConnected && (
           <p className="mb-4 text-sm text-muted-foreground">
-            Connect your wallet to see your on-chain match history. Showing sample data.
+            Connect your wallet to see your match history.
           </p>
         )}
         {isConnected && isLoading && (
@@ -106,21 +100,27 @@ export function MatchHistory() {
             {error}
           </p>
         )}
+        {!isLoading && !error && history.length === 0 && isConnected && (
+          <p className="mb-4 text-sm text-muted-foreground">
+            No match history yet. Play your first match to see results here.
+          </p>
+        )}
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-border">
-                <th className="text-left py-3 px-4 font-medium text-muted-foreground">Opponent</th>
-                <th className="text-left py-3 px-4 font-medium text-muted-foreground">Result</th>
-                <th className="text-left py-3 px-4 font-medium text-muted-foreground">Score</th>
-                <th className="text-right py-3 px-4 font-medium text-muted-foreground">Wager</th>
-                <th className="text-right py-3 px-4 font-medium text-muted-foreground">P/L</th>
-                <th className="text-left py-3 px-4 font-medium text-muted-foreground">Time</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.map((match) => (
+        {history.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="text-left py-3 px-4 font-medium text-muted-foreground">Opponent</th>
+                  <th className="text-left py-3 px-4 font-medium text-muted-foreground">Result</th>
+                  <th className="text-left py-3 px-4 font-medium text-muted-foreground">Score</th>
+                  <th className="text-right py-3 px-4 font-medium text-muted-foreground">Wager</th>
+                  <th className="text-right py-3 px-4 font-medium text-muted-foreground">P/L</th>
+                  <th className="text-left py-3 px-4 font-medium text-muted-foreground">Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((match) => (
                 <tr key={match.id} className="border-b border-border hover:bg-muted/50 transition-colors">
                   <td className="py-3 px-4 font-medium">{match.opponent.name}</td>
                   <td className="py-3 px-4">
@@ -147,12 +147,15 @@ export function MatchHistory() {
             </tbody>
           </table>
         </div>
+        )}
 
-        <div className="mt-8 flex justify-center">
-          <Button variant="outline" className="rounded-none border-muted-foreground text-foreground hover:bg-accent hover:text-accent-foreground bg-transparent">
-            View All History
-          </Button>
-        </div>
+        {history.length > 0 && (
+          <div className="mt-8 flex justify-center">
+            <Button variant="outline" className="rounded-none border-muted-foreground text-foreground hover:bg-accent hover:text-accent-foreground bg-transparent">
+              View All History
+            </Button>
+          </div>
+        )}
       </div>
     </section>
   )

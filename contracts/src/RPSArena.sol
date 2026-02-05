@@ -1,145 +1,107 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-/// @title RPSArena - Rock Paper Scissors best-of-5 arena with MON escrow
-/// @notice Native token (MON) wager, commit–reveal per round, 60s timeouts.
-contract RPSArena {
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+
+/// @title RPSArena - Off-chain Rock Paper Scissors arena with on-chain MON escrow
+/// @notice
+/// - Native token (MON) is escrowed per-match via stakeForMatch.
+/// - Rock–Paper–Scissors games are played fully off-chain (including commit–reveal).
+/// - Final match results are settled on-chain using EIP-712 typed data signed by BOTH players.
+/// - The contract does NOT know about individual rounds or moves; it only verifies
+///   that both players agreed on the same MatchResult and pays out accordingly.
+contract RPSArena is EIP712 {
     // ------------------------------------------------------------------------
     // Types
     // ------------------------------------------------------------------------
 
-    enum Move {
-        None,
-        Rock,
-        Paper,
-        Scissors
-    }
-
-    enum MatchStatus {
-        WaitingCommits,
-        WaitingReveals,
-        Finished
-    }
-
-    struct Round {
-        bytes32 commit1;
-        bytes32 commit2;
-        Move move1;
-        Move move2;
-        uint64 commitDeadline; // timestamp when commit phase expires
-        uint64 revealDeadline; // timestamp when reveal phase expires
-        bool revealed1;
-        bool revealed2;
-        bool decided; // round result has been applied to match scores
-    }
-
-    struct Match {
+    /// @notice Aggregated result of a best-of-N match, agreed off-chain.
+    /// @dev This struct is signed by both players using EIP-712.
+    struct MatchResult {
+        bytes32 matchId;       // off-chain match identifier
         address player1;
         address player2;
-        uint96 wager; // per-player wager in native token
-        uint8 roundsPlayed; // total rounds resolved (including draws and timeouts)
-        uint8 wins1;
-        uint8 wins2;
-        MatchStatus status;
-        bool settled; // payouts done
+        address winner;        // address(0) for draw
+        uint256 stake;         // per-player stake in native token
+        uint8   bestOf;        // e.g. 5
+        uint8   wins1;         // rounds won by player1
+        uint8   wins2;         // rounds won by player2
+        bytes32 transcriptHash; // hash of off-chain transcript (optional but recommended)
+        uint256 nonce;         // extra entropy / replay protection (off-chain chosen)
+    }
+
+    /// @notice Per-match escrowed stake info.
+    struct LockedMatch {
+        address player1;
+        address player2;
+        uint256 stake;         // per-player stake
+        bool player1Locked;
+        bool player2Locked;
+        bool settled;
     }
 
     // ------------------------------------------------------------------------
     // Storage
     // ------------------------------------------------------------------------
 
-    /// @notice Next match identifier (starts from 1)
-    uint256 public nextMatchId = 1;
+    /// @notice Escrowed stake per matchId.
+    mapping(bytes32 => LockedMatch) public lockedMatches;
 
-    /// @notice Mapping of match id to Match data
-    mapping(uint256 => Match) public matches;
-
-    /// @notice Mapping of match id => round => Round data
-    mapping(uint256 => mapping(uint8 => Round)) public rounds;
-
-    /// @notice Simple matchmaking queue by wager amount
-    /// At most one waiting player per wager.
-    mapping(uint256 => address) public waitingPlayer;
+    /// @notice Tracks which matchIds have been settled to prevent replay.
+    mapping(bytes32 => bool) public settledMatch;
 
     /// @notice Optional on-chain registration of player metadata (e.g. Moltbook agent name).
     mapping(address => string) public agentNames;
 
-    /// @notice Simple reentrancy guard
+    /// @notice Simple reentrancy guard.
     uint256 private _locked = 1;
 
     // ------------------------------------------------------------------------
     // Constants
     // ------------------------------------------------------------------------
 
-    uint256 public constant MAX_ROUNDS = 5;
-    uint256 public constant WINS_TO_FINISH = 3;
-    uint256 public constant PHASE_TIMEOUT = 60; // seconds for commit or reveal phase
+    /// @dev EIP-712 typehash for MatchResult.
+    bytes32 public constant MATCH_RESULT_TYPEHASH = keccak256(
+        "MatchResult(bytes32 matchId,address player1,address player2,address winner,uint256 stake,uint8 bestOf,uint8 wins1,uint8 wins2,bytes32 transcriptHash,uint256 nonce)"
+    );
+
+    /// @notice Default best-of value used by MoltArena (kept for basic validation).
+    uint8 public constant DEFAULT_BEST_OF = 5;
+
+    /// @notice Minimum per-player stake (in MON wei) required to join a match.
+    /// @dev Set to 0.1 MON assuming 18 decimals (i.e. 0.1 ether).
+    uint256 public constant MIN_STAKE = 0.1 ether;
 
     // ------------------------------------------------------------------------
     // Errors
     // ------------------------------------------------------------------------
 
-    error InvalidWager();
-    error InvalidMatch();
-    error InvalidRound();
-    error NotPlayer();
-    error AlreadyInQueue();
-    error NotInQueue();
-    error MatchAlreadyFinished();
-    error InvalidCommit();
-    error CommitAlreadySubmitted();
-    error RevealAlreadySubmitted();
-    error CommitMissing();
-    error RevealTooEarly();
-    error DeadlineNotPassed();
-    error NoTimeoutToClaim();
     error TransferFailed();
+    error ZeroAmount();
+    error StakeTooSmall();
+    error MatchAlreadySettled();
+    error MatchNotReady();
+    error StakeMismatch();
+    error InvalidPlayers();
+    error InvalidWinner();
+    error InvalidResult();
 
     // ------------------------------------------------------------------------
     // Events
     // ------------------------------------------------------------------------
 
-    event WaitingInQueue(address indexed player, uint256 indexed wager);
-    event QueueCancelled(address indexed player, uint256 indexed wager);
+    event StakeLocked(bytes32 indexed matchId, address indexed player, uint256 stake);
 
-    event MatchCreated(
-        uint256 indexed matchId,
+    event MatchSettled(
+        bytes32 indexed matchId,
         address indexed player1,
         address indexed player2,
-        uint256 wager
-    );
-
-    event RoundCommitted(
-        uint256 indexed matchId,
-        uint8 indexed round,
-        address indexed player
-    );
-
-    event RoundRevealed(
-        uint256 indexed matchId,
-        uint8 indexed round,
-        address indexed player,
-        Move move
-    );
-
-    event RoundResult(
-        uint256 indexed matchId,
-        uint8 indexed round,
-        int8 result // 1 = player1 win, -1 = player2 win, 0 = draw
-    );
-
-    event RoundTimeout(
-        uint256 indexed matchId,
-        uint8 indexed round,
-        address indexed winner,
-        string phase // "commit" or "reveal" or "both-missing"
-    );
-
-    event MatchFinished(
-        uint256 indexed matchId,
-        address indexed winner,
+        address winner,
+        uint256 stake,
         uint256 payoutPlayer1,
-        uint256 payoutPlayer2
+        uint256 payoutPlayer2,
+        bytes32 transcriptHash
     );
 
     /// @notice Emitted when a player registers or updates their on-chain agent name.
@@ -157,7 +119,13 @@ contract RPSArena {
     }
 
     // ------------------------------------------------------------------------
-    // Matchmaking
+    // Constructor
+    // ------------------------------------------------------------------------
+
+    constructor() EIP712("RPSArena", "2") {}
+
+    // ------------------------------------------------------------------------
+    // Agent metadata
     // ------------------------------------------------------------------------
 
     /// @notice Register or update your agent name on-chain.
@@ -170,367 +138,107 @@ contract RPSArena {
         emit AgentRegistered(msg.sender, agentName);
     }
 
-
-    /// @notice Join the matchmaking queue for a given wager.
-    /// @dev If another player is already waiting with the same wager,
-    ///      a new match is created and both wagers are escrowed.
-    /// @param wager The amount of native token each player wagers.
-    /// @return matchId The created match id, or 0 if you are now waiting in queue.
-    function enqueue(uint256 wager) external payable nonReentrant returns (uint256 matchId) {
-        if (wager == 0 || msg.value != wager) {
-            revert InvalidWager();
-        }
-
-        address waiting = waitingPlayer[wager];
-
-        if (waiting == address(0)) {
-            // No one waiting yet, this player becomes the queued player.
-            waitingPlayer[wager] = msg.sender;
-            emit WaitingInQueue(msg.sender, wager);
-            return 0;
-        }
-
-        if (waiting == msg.sender) {
-            // Same player cannot match against themselves.
-            revert AlreadyInQueue();
-        }
-
-        // Match found: previous waiting player + current caller.
-        waitingPlayer[wager] = address(0);
-
-        matchId = nextMatchId++;
-
-        Match storage m = matches[matchId];
-        m.player1 = waiting;
-        m.player2 = msg.sender;
-        m.wager = uint96(wager);
-        m.status = MatchStatus.WaitingCommits;
-
-        emit MatchCreated(matchId, waiting, msg.sender, wager);
-    }
-
-    /// @notice Cancel your position in the queue for a specific wager and refund your stake.
-    /// @param wager The wager you previously enqueued with.
-    function cancelEnqueue(uint256 wager) external nonReentrant {
-        if (waitingPlayer[wager] != msg.sender) {
-            revert NotInQueue();
-        }
-        waitingPlayer[wager] = address(0);
-
-        (bool ok, ) = msg.sender.call{value: wager}("");
-        if (!ok) revert TransferFailed();
-
-        emit QueueCancelled(msg.sender, wager);
-    }
-
     // ------------------------------------------------------------------------
-    // Commit-reveal gameplay
+    // Match staking (per-match deposit)
     // ------------------------------------------------------------------------
 
-    /// @notice Commit your move hash for a given round in a match.
-    /// @dev commitHash should be keccak256(abi.encodePacked(matchId, round, player, move, salt)).
-    /// @param matchId The match identifier.
-    /// @param round The round number (1–5).
-    /// @param commitHash The commitment hash.
-    function commitMove(
-        uint256 matchId,
-        uint8 round,
-        bytes32 commitHash
-    ) external {
-        if (round == 0 || round > MAX_ROUNDS) revert InvalidRound();
+    /// @notice Stake native token (MON) directly for an off-chain match.
+    /// @dev
+    /// - First caller for a given matchId becomes player1 and sets the stake (= msg.value).
+    /// - Second distinct caller becomes player2 and must send the SAME msg.value.
+    /// - Native token sent in this function is held in escrow until settleMatch is called.
+    /// @param matchId Off-chain match identifier agreed by the coordinator & agents.
+    function stakeForMatch(bytes32 matchId) external payable nonReentrant {
+        if (msg.value == 0) revert ZeroAmount();
+        if (msg.value < MIN_STAKE) revert StakeTooSmall();
+        if (settledMatch[matchId]) revert MatchAlreadySettled();
 
-        Match storage m = matches[matchId];
-        if (m.player1 == address(0)) revert InvalidMatch();
-        if (m.status == MatchStatus.Finished) revert MatchAlreadyFinished();
+        LockedMatch storage m = lockedMatches[matchId];
 
-        bool isP1 = msg.sender == m.player1;
-        bool isP2 = msg.sender == m.player2;
-        if (!isP1 && !isP2) revert NotPlayer();
+        if (m.player1 == address(0)) {
+            // First player joins this match.
+            m.player1 = msg.sender;
+            m.stake = msg.value;
+            m.player1Locked = true;
+        } else if (m.player2 == address(0)) {
+            // Second player joins; must send the same stake amount.
+            if (m.stake != msg.value) revert StakeMismatch();
 
-        Round storage r = rounds[matchId][round];
-
-        // Cannot commit after commit deadline (if already set)
-        if (r.commitDeadline != 0 && block.timestamp > r.commitDeadline) {
-            revert InvalidCommit();
-        }
-
-        if (isP1) {
-            if (r.commit1 != bytes32(0)) revert CommitAlreadySubmitted();
-            r.commit1 = commitHash;
+            m.player2 = msg.sender;
+            m.player2Locked = true;
         } else {
-            if (r.commit2 != bytes32(0)) revert CommitAlreadySubmitted();
-            r.commit2 = commitHash;
+            // Already have two players.
+            revert MatchNotReady();
         }
 
-        // Start commit phase timer on first commit
-        if (r.commitDeadline == 0) {
-            r.commitDeadline = uint64(block.timestamp + PHASE_TIMEOUT);
-        }
-
-        // Ensure match status is at least WaitingCommits
-        if (m.status == MatchStatus.Finished) revert MatchAlreadyFinished();
-        m.status = MatchStatus.WaitingCommits;
-
-        emit RoundCommitted(matchId, round, msg.sender);
-    }
-
-    /// @notice Reveal your move for a given round.
-    /// @param matchId The match identifier.
-    /// @param round The round number (1–5).
-    /// @param move The move (Rock, Paper, or Scissors).
-    /// @param salt The secret salt used in the commit hash.
-    function revealMove(
-        uint256 matchId,
-        uint8 round,
-        Move move,
-        bytes32 salt
-    ) external {
-        if (round == 0 || round > MAX_ROUNDS) revert InvalidRound();
-        if (move == Move.None) revert InvalidCommit();
-
-        Match storage m = matches[matchId];
-        if (m.player1 == address(0)) revert InvalidMatch();
-        if (m.status == MatchStatus.Finished) revert MatchAlreadyFinished();
-
-        bool isP1 = msg.sender == m.player1;
-        bool isP2 = msg.sender == m.player2;
-        if (!isP1 && !isP2) revert NotPlayer();
-
-        Round storage r = rounds[matchId][round];
-
-        // Must have commits from both players before reveal phase
-        if (r.commit1 == bytes32(0) || r.commit2 == bytes32(0)) revert CommitMissing();
-
-        // Start reveal timer on first reveal
-        if (r.revealDeadline == 0) {
-            r.revealDeadline = uint64(block.timestamp + PHASE_TIMEOUT);
-        } else {
-            // Cannot reveal after deadline
-            if (block.timestamp > r.revealDeadline) revert RevealTooEarly();
-        }
-
-        if (isP1) {
-            if (r.revealed1) revert RevealAlreadySubmitted();
-            // Verify commitment
-            if (_computeCommit(matchId, round, m.player1, move, salt) != r.commit1) {
-                revert InvalidCommit();
-            }
-            r.move1 = move;
-            r.revealed1 = true;
-        } else {
-            if (r.revealed2) revert RevealAlreadySubmitted();
-            if (_computeCommit(matchId, round, m.player2, move, salt) != r.commit2) {
-                revert InvalidCommit();
-            }
-            r.move2 = move;
-            r.revealed2 = true;
-        }
-
-        m.status = MatchStatus.WaitingReveals;
-
-        emit RoundRevealed(matchId, round, msg.sender, move);
-
-        // If both revealed, resolve the round immediately.
-        if (r.revealed1 && r.revealed2 && !r.decided) {
-            _resolveRound(matchId, round, m, r);
-        }
+        emit StakeLocked(matchId, msg.sender, msg.value);
     }
 
     // ------------------------------------------------------------------------
-    // Timeout handlers
+    // Settlement via EIP-712 MatchResult
     // ------------------------------------------------------------------------
 
-    /// @notice Claim a round win if the opponent failed to commit before the commit deadline.
-    /// @param matchId The match identifier.
-    /// @param round The round number.
-    function claimCommitTimeout(uint256 matchId, uint8 round) external {
-        if (round == 0 || round > MAX_ROUNDS) revert InvalidRound();
+    /// @notice Settle an off-chain RPS match using a MatchResult signed by BOTH players.
+    /// @dev
+    /// - Verifies EIP-712 signatures from player1 & player2.
+    /// - Ensures the result is consistent with the locked match (players & stake).
+    /// - Pays out winner or refunds on draw, then marks the match as settled.
+    /// - Anyone can call this function as long as they provide valid signatures.
+    /// @param result The off-chain MatchResult struct.
+    /// @param sigPlayer1 EIP-712 signature from result.player1.
+    /// @param sigPlayer2 EIP-712 signature from result.player2.
+    function settleMatch(
+        MatchResult calldata result,
+        bytes calldata sigPlayer1,
+        bytes calldata sigPlayer2
+    ) external nonReentrant {
+        bytes32 matchId = result.matchId;
 
-        Match storage m = matches[matchId];
-        if (m.player1 == address(0)) revert InvalidMatch();
-        if (m.status == MatchStatus.Finished) revert MatchAlreadyFinished();
+        if (settledMatch[matchId]) revert MatchAlreadySettled();
 
-        Round storage r = rounds[matchId][round];
-        if (r.commitDeadline == 0 || block.timestamp <= r.commitDeadline) {
-            revert DeadlineNotPassed();
-        }
-        if (r.decided) revert NoTimeoutToClaim();
+        LockedMatch storage m = lockedMatches[matchId];
 
-        bool p1Committed = r.commit1 != bytes32(0);
-        bool p2Committed = r.commit2 != bytes32(0);
+        // Ensure match has two players and both have locked stake.
+        if (m.player1 == address(0) || m.player2 == address(0)) revert MatchNotReady();
+        if (!m.player1Locked || !m.player2Locked) revert MatchNotReady();
 
-        address winner;
-        int8 result;
+        // Basic consistency checks with locked match.
+        if (m.player1 != result.player1 || m.player2 != result.player2) revert InvalidPlayers();
+        if (result.stake != m.stake) revert StakeMismatch();
 
-        if (p1Committed && !p2Committed) {
-            m.wins1 += 1;
-            winner = m.player1;
-            result = 1;
-        } else if (!p1Committed && p2Committed) {
-            m.wins2 += 1;
-            winner = m.player2;
-            result = -1;
-        } else {
-            // Both failed to commit: treat as draw round.
-            result = 0;
-        }
+        // Validate basic RPS rules for best-of-N.
+        _validateResultScores(result);
 
-        r.decided = true;
-        m.roundsPlayed += 1;
+        // Verify signatures using EIP-712 typed data.
+        address recovered1 = _recoverSigner(result, sigPlayer1);
+        address recovered2 = _recoverSigner(result, sigPlayer2);
 
-        emit RoundTimeout(matchId, round, winner, "commit");
-        emit RoundResult(matchId, round, result);
-
-        _maybeFinishMatch(matchId, m);
-    }
-
-    /// @notice Claim a round win if the opponent failed to reveal before the reveal deadline.
-    /// @param matchId The match identifier.
-    /// @param round The round number.
-    function claimRevealTimeout(uint256 matchId, uint8 round) external {
-        if (round == 0 || round > MAX_ROUNDS) revert InvalidRound();
-
-        Match storage m = matches[matchId];
-        if (m.player1 == address(0)) revert InvalidMatch();
-        if (m.status == MatchStatus.Finished) revert MatchAlreadyFinished();
-
-        Round storage r = rounds[matchId][round];
-        if (r.revealDeadline == 0 || block.timestamp <= r.revealDeadline) {
-            revert DeadlineNotPassed();
-        }
-        if (r.decided) revert NoTimeoutToClaim();
-
-        bool p1Revealed = r.revealed1;
-        bool p2Revealed = r.revealed2;
-
-        address winner;
-        int8 result;
-
-        if (p1Revealed && !p2Revealed) {
-            m.wins1 += 1;
-            winner = m.player1;
-            result = 1;
-        } else if (!p1Revealed && p2Revealed) {
-            m.wins2 += 1;
-            winner = m.player2;
-            result = -1;
-        } else {
-            // Both failed to reveal: draw.
-            result = 0;
+        if (recovered1 != result.player1 || recovered2 != result.player2) {
+            revert InvalidResult();
         }
 
-        r.decided = true;
-        m.roundsPlayed += 1;
-
-        emit RoundTimeout(matchId, round, winner, "reveal");
-        emit RoundResult(matchId, round, result);
-
-        _maybeFinishMatch(matchId, m);
-    }
-
-    // ------------------------------------------------------------------------
-    // View helpers
-    // ------------------------------------------------------------------------
-
-    /// @notice Get the basic info of a match.
-    function getMatch(uint256 matchId)
-        external
-        view
-        returns (
-            address player1,
-            address player2,
-            uint256 wager,
-            uint8 roundsPlayed,
-            uint8 wins1,
-            uint8 wins2,
-            MatchStatus status,
-            bool settled
-        )
-    {
-        Match storage m = matches[matchId];
-        return (m.player1, m.player2, m.wager, m.roundsPlayed, m.wins1, m.wins2, m.status, m.settled);
-    }
-
-    // ------------------------------------------------------------------------
-    // Internal logic
-    // ------------------------------------------------------------------------
-
-    function _computeCommit(
-        uint256 matchId,
-        uint8 round,
-        address player,
-        Move move,
-        bytes32 salt
-    ) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(matchId, round, player, move, salt));
-    }
-
-    function _resolveRound(
-        uint256 matchId,
-        uint8 round,
-        Match storage m,
-        Round storage r
-    ) internal {
-        if (r.decided) return;
-
-        int8 result = _compareMoves(r.move1, r.move2);
-
-        if (result == 1) {
-            m.wins1 += 1;
-        } else if (result == -1) {
-            m.wins2 += 1;
-        }
-
-        r.decided = true;
-        m.roundsPlayed += 1;
-
-        emit RoundResult(matchId, round, result);
-
-        _maybeFinishMatch(matchId, m);
-    }
-
-    function _compareMoves(Move m1, Move m2) internal pure returns (int8) {
-        if (m1 == m2) {
-            return 0; // draw
-        }
-        if (m1 == Move.Rock && m2 == Move.Scissors) return 1;
-        if (m1 == Move.Paper && m2 == Move.Rock) return 1;
-        if (m1 == Move.Scissors && m2 == Move.Paper) return 1;
-        return -1;
-    }
-
-    function _maybeFinishMatch(uint256 matchId, Match storage m) internal nonReentrant {
-        if (m.status == MatchStatus.Finished || m.settled) {
-            return;
-        }
-
-        if (m.wins1 >= WINS_TO_FINISH || m.wins2 >= WINS_TO_FINISH || m.roundsPlayed >= MAX_ROUNDS) {
-            m.status = MatchStatus.Finished;
-            _settle(matchId, m);
-        }
-    }
-
-    function _settle(uint256 matchId, Match storage m) internal {
-        if (m.settled) return;
+        // Mark as settled to prevent replay.
+        settledMatch[matchId] = true;
         m.settled = true;
 
-        uint256 pot = uint256(m.wager) * 2;
+        // Compute payouts.
+        uint256 pot = m.stake * 2;
         uint256 payout1;
         uint256 payout2;
-        address winner;
 
-        if (m.wins1 > m.wins2) {
+        if (result.winner == address(0)) {
+            // Draw: refund stake to both.
+            payout1 = m.stake;
+            payout2 = m.stake;
+        } else if (result.winner == m.player1) {
             payout1 = pot;
-            winner = m.player1;
-        } else if (m.wins2 > m.wins1) {
+        } else if (result.winner == m.player2) {
             payout2 = pot;
-            winner = m.player2;
         } else {
-            // Draw: refund both
-            payout1 = m.wager;
-            payout2 = m.wager;
+            revert InvalidWinner();
         }
 
+        // Pay directly in native token.
         if (payout1 > 0) {
             (bool ok1, ) = m.player1.call{value: payout1}("");
             if (!ok1) revert TransferFailed();
@@ -540,10 +248,87 @@ contract RPSArena {
             if (!ok2) revert TransferFailed();
         }
 
-        emit MatchFinished(matchId, winner, payout1, payout2);
+        emit MatchSettled(
+            matchId,
+            m.player1,
+            m.player2,
+            result.winner,
+            m.stake,
+            payout1,
+            payout2,
+            result.transcriptHash
+        );
     }
 
-    // Disallow accidental direct transfers
+    // ------------------------------------------------------------------------
+    // Internal helpers
+    // ------------------------------------------------------------------------
+
+    function _validateResultScores(MatchResult calldata result) internal pure {
+        // Ensure basic best-of-N constraints.
+        uint8 bestOf = result.bestOf;
+        if (bestOf == 0) revert InvalidResult();
+
+        // For Moltarena we expect bestOf == DEFAULT_BEST_OF (5),
+        // but keep it a soft check to allow future flexibility if needed.
+        if (bestOf != DEFAULT_BEST_OF) {
+            revert InvalidResult();
+        }
+
+        uint8 w1 = result.wins1;
+        uint8 w2 = result.wins2;
+
+        // No one can win more than bestOf or negative, etc.
+        if (w1 > bestOf || w2 > bestOf) revert InvalidResult();
+
+        // In best-of-5 first to 3 wins, so max wins is 3.
+        if (w1 > 3 || w2 > 3) revert InvalidResult();
+
+        uint8 totalRounds = w1 + w2;
+        if (totalRounds > bestOf) revert InvalidResult();
+
+        // Winner must be consistent with scores.
+        if (result.winner == address(0)) {
+            // Draw.
+            if (w1 != w2) revert InvalidResult();
+        } else if (result.winner == result.player1) {
+            if (w1 <= w2) revert InvalidResult();
+        } else if (result.winner == result.player2) {
+            if (w2 <= w1) revert InvalidResult();
+        } else {
+            revert InvalidWinner();
+        }
+    }
+
+    function _recoverSigner(
+        MatchResult calldata result,
+        bytes calldata signature
+    ) internal view returns (address) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                MATCH_RESULT_TYPEHASH,
+                result.matchId,
+                result.player1,
+                result.player2,
+                result.winner,
+                result.stake,
+                result.bestOf,
+                result.wins1,
+                result.wins2,
+                result.transcriptHash,
+                result.nonce
+            )
+        );
+
+        bytes32 digest = _hashTypedDataV4(structHash);
+        return ECDSA.recover(digest, signature);
+    }
+
+    // ------------------------------------------------------------------------
+    // Fallbacks
+    // ------------------------------------------------------------------------
+
+    /// @dev Disallow accidental direct transfers; users must call deposit().
     receive() external payable {
         revert();
     }
@@ -552,4 +337,3 @@ contract RPSArena {
         revert();
     }
 }
-
