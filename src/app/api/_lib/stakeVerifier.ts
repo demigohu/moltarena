@@ -20,12 +20,22 @@ export async function checkOnChainStake(
 ): Promise<LockedMatch | null> {
   try {
     const matchIdBytes32 = keccak256(toBytes(matchId));
+    console.log(`Checking on-chain stake for matchId: ${matchId}, bytes32: ${matchIdBytes32}`);
 
     const lockedMatch = await publicClient.readContract({
       address: RPS_ARENA_ADDRESS,
       abi: RPS_ARENA_ABI,
       functionName: "lockedMatches",
       args: [matchIdBytes32],
+    });
+
+    console.log(`On-chain stake result:`, {
+      player1: lockedMatch[0],
+      player2: lockedMatch[1],
+      stake: lockedMatch[2].toString(),
+      player1Locked: lockedMatch[3],
+      player2Locked: lockedMatch[4],
+      settled: lockedMatch[5],
     });
 
     // lockedMatches returns: [player1, player2, stake, player1Locked, player2Locked, settled]
@@ -38,7 +48,7 @@ export async function checkOnChainStake(
       settled: lockedMatch[5] as boolean,
     };
   } catch (error) {
-    console.error("Failed to check on-chain stake:", error);
+    console.error(`Failed to check on-chain stake for matchId ${matchId}:`, error);
     return null;
   }
 }

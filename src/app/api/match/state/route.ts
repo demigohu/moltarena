@@ -117,7 +117,19 @@ export async function GET(req: NextRequest) {
   // STAKE VERIFICATION: Check on-chain stake and auto-transition lobby → in_progress
   if (match.status === "lobby") {
     const lockedMatch = await checkOnChainStake(matchId);
+    console.log(`[${matchId}] Stake check:`, {
+      lockedMatch: lockedMatch ? {
+        player1: lockedMatch.player1,
+        player2: lockedMatch.player2,
+        player1Locked: lockedMatch.player1Locked,
+        player2Locked: lockedMatch.player2Locked,
+      } : null,
+      isStakeReady: isStakeReady(lockedMatch),
+    });
+
     if (isStakeReady(lockedMatch)) {
+      console.log(`[${matchId}] Both players staked! Transitioning to in_progress...`);
+      
       // Both players staked on-chain → transition to in_progress and create round 1
       const { data: existingRound1 } = await supabase
         .from("match_rounds")
@@ -128,11 +140,12 @@ export async function GET(req: NextRequest) {
 
       if (!existingRound1) {
         // Create round 1 with commit deadline starting now
+        console.log(`[${matchId}] Creating round 1...`);
         await createRound1(matchId);
       }
 
       // Update match status to in_progress
-      await supabase
+      const { error: updateError } = await supabase
         .from("matches")
         .update({
           status: "in_progress",
@@ -140,7 +153,22 @@ export async function GET(req: NextRequest) {
         })
         .eq("id", matchId);
 
-      match.status = "in_progress";
+      if (updateError) {
+        console.error(`[${matchId}] Failed to update status to in_progress:`, updateError);
+      } else {
+        console.log(`[${matchId}] Status updated to in_progress`);
+        // Re-fetch match to get updated status
+        const { data: updatedMatch } = await supabase
+          .from("matches")
+          .select("status")
+          .eq("id", matchId)
+          .single();
+        if (updatedMatch) {
+          match.status = updatedMatch.status as typeof match.status;
+        }
+      }
+    } else {
+      console.log(`[${matchId}] Stake not ready yet. Player1: ${lockedMatch?.player1Locked}, Player2: ${lockedMatch?.player2Locked}`);
     }
   }
 
@@ -190,10 +218,32 @@ export async function GET(req: NextRequest) {
     };
   });
 
-  // Determine action needed
+  // Determine action needed (after potential status update)
   let actionNeeded: string | null = null;
+  
+  // Re-check status in case it was updated above
   if (match.status === "lobby") {
-    actionNeeded = "stake"; // Need to stake on-chain
+    // Double-check stake status
+    const lockedMatch = await checkOnChainStake(matchId);
+    if (isStakeReady(lockedMatch)) {
+      // Both staked but status still lobby - might be transitioning
+      // Check if round 1 exists
+      const { data: round1 } = await supabase
+        .from("match_rounds")
+        .select("id, phase")
+        .eq("match_id", matchId)
+        .eq("round_number", 1)
+        .single();
+      
+      if (round1) {
+        // Round 1 exists, should be in_progress
+        actionNeeded = round1.phase === "commit" ? "commit" : "wait_reveal";
+      } else {
+        actionNeeded = "stake"; // Still waiting for transition
+      }
+    } else {
+      actionNeeded = "stake"; // Need to stake on-chain
+    }
   } else if (match.status === "in_progress") {
     if (!currentRound) {
       // All rounds done, match should be finished
@@ -224,9 +274,16 @@ export async function GET(req: NextRequest) {
       } else {
         actionNeeded = "wait_result"; // Wait for opponent reveal
       }
+    } else if (currentRound.phase === "done") {
+      // Round done, check if match finished
+      actionNeeded = "wait_result"; // Wait for next round or match finish
     }
-  } else if (match.status === "finished" && !match.winner_address) {
-    actionNeeded = "finalize";
+  } else if (match.status === "finished") {
+    if (!match.winner_address) {
+      actionNeeded = "finalize";
+    } else {
+      actionNeeded = null; // Match fully finished
+    }
   }
 
   return NextResponse.json({
