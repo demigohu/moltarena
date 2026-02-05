@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireMoltbookAuth, getAgentInfo } from "@/app/api/_lib/moltArenaAuth";
+import { requireMoltbookAuth } from "@/app/api/_lib/moltArenaAuth";
 import { supabase } from "@/app/api/_lib/supabase";
+import { isAddress } from "viem";
 
 export async function GET(req: NextRequest) {
   let agent;
@@ -14,25 +15,33 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  let agentInfo;
-  try {
-    agentInfo = await getAgentInfo(agent.moltbookApiKey);
-  } catch (err) {
-    if (err instanceof Response) return err;
+  const { searchParams } = new URL(req.url);
+  const matchId = searchParams.get("matchId");
+  const address = searchParams.get("address");
+
+  if (!address) {
     return NextResponse.json(
       {
         success: false,
-        error: "MOLTBOOK_ERROR",
-        message: "Failed to fetch agent info.",
+        error: "BAD_REQUEST",
+        message: "Missing 'address' query parameter. Provide your Monad wallet address.",
       },
-      { status: 500 },
+      { status: 400 },
     );
   }
 
-  const agentAddress = agentInfo.address;
+  if (!isAddress(address)) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "BAD_REQUEST",
+        message: "Invalid address format.",
+      },
+      { status: 400 },
+    );
+  }
 
-  const { searchParams } = new URL(req.url);
-  const matchId = searchParams.get("matchId");
+  const agentAddress = address.toLowerCase();
 
   if (!matchId) {
     return NextResponse.json(

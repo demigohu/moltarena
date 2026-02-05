@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireMoltbookAuth, getAgentInfo } from "@/app/api/_lib/moltArenaAuth";
+import { requireMoltbookAuth, getAgentName } from "@/app/api/_lib/moltArenaAuth";
 import { supabase } from "@/app/api/_lib/supabase";
 import { RPS_ARENA_ADDRESS } from "@/app/api/_lib/monadClient";
 import { keccak256, toBytes, toHex } from "viem";
+import { isAddress } from "viem";
 
 const MIN_STAKE = "0.1"; // Fixed stake per match
+
+type JoinBody = {
+  address?: string; // Wallet address from agent's Monad wallet (required)
+};
 
 export async function POST(req: NextRequest) {
   let agent;
@@ -18,31 +23,79 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Fetch agent info from Moltbook (address + name)
-  let agentInfo;
+  // Parse request body for wallet address
+  let body: JoinBody;
   try {
-    agentInfo = await getAgentInfo(agent.moltbookApiKey);
-  } catch (err) {
-    if (err instanceof Response) return err;
+    body = await req.json();
+  } catch {
     return NextResponse.json(
       {
         success: false,
-        error: "MOLTBOOK_ERROR",
-        message: "Failed to fetch agent info from Moltbook.",
+        error: "BAD_REQUEST",
+        message: "Invalid JSON body.",
       },
-      { status: 500 },
+      { status: 400 },
     );
   }
 
-  const agentAddress = agentInfo.address;
-  const agentName = agentInfo.name;
+  const agentAddress = body.address;
+  if (!agentAddress) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "BAD_REQUEST",
+        message: "Missing 'address' field in request body. Provide your Monad wallet address.",
+      },
+      { status: 400 },
+    );
+  }
+
+  // Validate address format
+  if (!isAddress(agentAddress)) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "BAD_REQUEST",
+        message: "Invalid address format. Must be a valid Ethereum address (0x...).",
+      },
+      { status: 400 },
+    );
+  }
+
+  // Fetch agent name from Moltbook (address comes from wallet)
+  let agentName: string;
+  try {
+    agentName = await getAgentName(agent.moltbookApiKey);
+  } catch (err) {
+    if (err instanceof Response) return err;
+    // If Moltbook fails, use fallback name
+    agentName = `Agent-${agentAddress.slice(0, 8)}`;
+    console.warn("Failed to fetch agent name from Moltbook, using fallback:", agentName);
+  }
+
+  // Cache agent info in Supabase (non-blocking)
+  try {
+    await supabase
+      .from("agents")
+      .upsert(
+        {
+          address: agentAddress.toLowerCase(),
+          agent_name: agentName,
+        },
+        { onConflict: "address" }
+      );
+  } catch (supabaseError) {
+    console.warn("Failed to cache agent info in Supabase:", supabaseError);
+  }
+
+  const normalizedAddress = agentAddress.toLowerCase();
 
   // Check if agent already has an active match (lobby or in_progress)
   const { data: existingMatch } = await supabase
     .from("matches")
     .select("id, status, player1_address, player2_address")
     .or(
-      `player1_address.eq.${agentAddress},player2_address.eq.${agentAddress}`
+      `player1_address.eq.${normalizedAddress},player2_address.eq.${normalizedAddress}`
     )
     .in("status", ["lobby", "in_progress"])
     .order("created_at", { ascending: false })
@@ -53,7 +106,7 @@ export async function POST(req: NextRequest) {
     // Agent already in a match, return that matchId
     const matchIdBytes32 = keccak256(toBytes(existingMatch.id));
     const role =
-      existingMatch.player1_address.toLowerCase() === agentAddress
+      existingMatch.player1_address.toLowerCase() === normalizedAddress
         ? "player1"
         : "player2";
 
@@ -74,7 +127,7 @@ export async function POST(req: NextRequest) {
     .eq("status", "lobby")
     .is("player2_address", null)
     .eq("stake", MIN_STAKE)
-    .neq("player1_address", agentAddress)
+    .neq("player1_address", normalizedAddress)
     .order("created_at", { ascending: true })
     .limit(1)
     .single();
@@ -87,7 +140,7 @@ export async function POST(req: NextRequest) {
     const { error: updateError } = await supabase
       .from("matches")
       .update({
-        player2_address: agentAddress,
+        player2_address: normalizedAddress,
         player2_name: agentName,
         status: "in_progress",
         updated_at: new Date().toISOString(),
@@ -111,7 +164,7 @@ export async function POST(req: NextRequest) {
       .insert({
         status: "lobby",
         stake: MIN_STAKE,
-        player1_address: agentAddress,
+        player1_address: normalizedAddress,
         player1_name: agentName,
         best_of: 5,
       })
@@ -136,7 +189,7 @@ export async function POST(req: NextRequest) {
   // Log action
   await supabase.from("match_actions").insert({
     match_id: matchId,
-    player_address: agentAddress,
+    player_address: normalizedAddress,
     agent_name: agentName,
     action: "join",
     payload: { role },

@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireMoltbookAuth, getAgentInfo } from "@/app/api/_lib/moltArenaAuth";
+import { requireMoltbookAuth, getAgentName } from "@/app/api/_lib/moltArenaAuth";
 import { supabase } from "@/app/api/_lib/supabase";
 import { keccak256, toBytes } from "viem";
+import { isAddress } from "viem";
 
 type RevealBody = {
   matchId: string;
   roundNumber: number;
   move: number; // 1 = Rock, 2 = Paper, 3 = Scissors
   salt: string; // hex string (0x...)
+  address: string; // Agent's Monad wallet address
 };
 
 // RPS logic: 1=Rock, 2=Paper, 3=Scissors
@@ -35,23 +37,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  let agentInfo;
-  try {
-    agentInfo = await getAgentInfo(agent.moltbookApiKey);
-  } catch (err) {
-    if (err instanceof Response) return err;
-    return NextResponse.json(
-      {
-        success: false,
-        error: "MOLTBOOK_ERROR",
-        message: "Failed to fetch agent info.",
-      },
-      { status: 500 },
-    );
-  }
-
-  const agentAddress = agentInfo.address;
-
   let body: RevealBody;
   try {
     body = await req.json();
@@ -66,17 +51,38 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { matchId, roundNumber, move, salt } = body;
+  const { matchId, roundNumber, move, salt, address } = body;
 
-  if (!matchId || !roundNumber || move === undefined || !salt) {
+  if (!matchId || !roundNumber || move === undefined || !salt || !address) {
     return NextResponse.json(
       {
         success: false,
         error: "BAD_REQUEST",
-        message: "Missing required fields: matchId, roundNumber, move, salt.",
+        message: "Missing required fields: matchId, roundNumber, move, salt, address.",
       },
       { status: 400 },
     );
+  }
+
+  if (!isAddress(address)) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "BAD_REQUEST",
+        message: "Invalid address format.",
+      },
+      { status: 400 },
+    );
+  }
+
+  const agentAddress = address.toLowerCase();
+
+  // Fetch agent name from Moltbook (optional, for logging)
+  let agentName: string;
+  try {
+    agentName = await getAgentName(agent.moltbookApiKey);
+  } catch {
+    agentName = `Agent-${agentAddress.slice(0, 8)}`;
   }
 
   if (move < 1 || move > 3) {
@@ -288,7 +294,7 @@ export async function POST(req: NextRequest) {
   await supabase.from("match_actions").insert({
     match_id: matchId,
     player_address: agentAddress,
-    agent_name: agentInfo.name,
+    agent_name: agentName,
     action: "reveal",
     payload: { roundNumber, move },
   });

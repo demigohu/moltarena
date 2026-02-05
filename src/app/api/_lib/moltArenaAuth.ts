@@ -41,56 +41,68 @@ export function requireMoltbookAuth(req: NextRequest): AuthedAgent {
 }
 
 /**
- * Fetch agent info from Moltbook API (address + name).
- * Caches result in Supabase agents table.
+ * Fetch agent name from Moltbook API.
+ * Note: Moltbook API only returns agent name, not wallet address.
+ * Address must be provided by the agent from their wallet.
  */
-export async function getAgentInfo(moltbookApiKey: string): Promise<{
-  address: string;
-  name: string;
-}> {
+export async function getAgentName(moltbookApiKey: string): Promise<string> {
   try {
     const res = await fetch(`${MOLTBOOK_API_BASE}/agents/me`, {
       headers: {
         Authorization: `Bearer ${moltbookApiKey}`,
+        "Content-Type": "application/json",
       },
     });
 
     if (!res.ok) {
-      throw new Error(`Moltbook API error: ${res.status}`);
+      const errorText = await res.text();
+      console.error(
+        `Moltbook API error ${res.status}:`,
+        errorText.substring(0, 500)
+      );
+      throw new Error(
+        `Moltbook API error: ${res.status} - ${errorText.substring(0, 200)}`
+      );
     }
 
     const json = await res.json();
-    const agent = json?.agent;
+    console.log("Moltbook API response:", JSON.stringify(json, null, 2));
 
-    if (!agent?.address || !agent?.name) {
-      throw new Error("Missing address or name in Moltbook response");
+    // Try different response formats
+    const agent =
+      json?.agent ||
+      json?.data?.agent ||
+      json?.data ||
+      json?.result ||
+      json;
+
+    if (!agent || typeof agent !== "object") {
+      throw new Error(
+        `Unexpected Moltbook response format. Full response: ${JSON.stringify(json, null, 2)}`
+      );
     }
 
-    // Upsert ke Supabase untuk cache
-    const { supabase } = await import("./supabase");
-    await supabase
-      .from("agents")
-      .upsert(
-        {
-          address: agent.address.toLowerCase(),
-          agent_name: agent.name,
-        },
-        { onConflict: "address" }
-      )
-      .select()
-      .single();
+    // Try multiple field names for name
+    const name =
+      agent.name ||
+      agent.agentName ||
+      agent.agent_name ||
+      agent.displayName ||
+      agent.display_name ||
+      agent.username ||
+      agent.user_name ||
+      "Unnamed Agent";
 
-    return {
-      address: agent.address.toLowerCase(),
-      name: agent.name,
-    };
+    return name;
   } catch (error) {
-    console.error("Failed to fetch agent info from Moltbook", error);
+    console.error("Failed to fetch agent name from Moltbook", error);
+    const errorMessage =
+      error instanceof Error ? error.message : "Unknown error";
     throw new Response(
       JSON.stringify({
         success: false,
         error: "MOLTBOOK_ERROR",
-        message: "Failed to fetch agent info from Moltbook.",
+        message: `Failed to fetch agent name from Moltbook: ${errorMessage}`,
       }),
       { status: 500, headers: { "content-type": "application/json" } },
     );

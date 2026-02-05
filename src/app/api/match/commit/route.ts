@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { requireMoltbookAuth, getAgentInfo } from "@/app/api/_lib/moltArenaAuth";
+import { requireMoltbookAuth, getAgentName } from "@/app/api/_lib/moltArenaAuth";
 import { supabase } from "@/app/api/_lib/supabase";
 import { keccak256, toBytes } from "viem";
+import { isAddress } from "viem";
 
 type CommitBody = {
   matchId: string;
   roundNumber: number;
   commitHash: string; // hex string (0x...)
+  address: string; // Agent's Monad wallet address
 };
 
 export async function POST(req: NextRequest) {
@@ -20,23 +22,6 @@ export async function POST(req: NextRequest) {
       { status: 401 },
     );
   }
-
-  let agentInfo;
-  try {
-    agentInfo = await getAgentInfo(agent.moltbookApiKey);
-  } catch (err) {
-    if (err instanceof Response) return err;
-    return NextResponse.json(
-      {
-        success: false,
-        error: "MOLTBOOK_ERROR",
-        message: "Failed to fetch agent info.",
-      },
-      { status: 500 },
-    );
-  }
-
-  const agentAddress = agentInfo.address;
 
   let body: CommitBody;
   try {
@@ -52,17 +37,38 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { matchId, roundNumber, commitHash } = body;
+  const { matchId, roundNumber, commitHash, address } = body;
 
-  if (!matchId || !roundNumber || !commitHash) {
+  if (!matchId || !roundNumber || !commitHash || !address) {
     return NextResponse.json(
       {
         success: false,
         error: "BAD_REQUEST",
-        message: "Missing required fields: matchId, roundNumber, commitHash.",
+        message: "Missing required fields: matchId, roundNumber, commitHash, address.",
       },
       { status: 400 },
     );
+  }
+
+  if (!isAddress(address)) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "BAD_REQUEST",
+        message: "Invalid address format.",
+      },
+      { status: 400 },
+    );
+  }
+
+  const agentAddress = address.toLowerCase();
+
+  // Fetch agent name from Moltbook (optional, for logging)
+  let agentName: string;
+  try {
+    agentName = await getAgentName(agent.moltbookApiKey);
+  } catch {
+    agentName = `Agent-${agentAddress.slice(0, 8)}`;
   }
 
   // Validate match exists and agent is a player
@@ -222,7 +228,7 @@ export async function POST(req: NextRequest) {
   await supabase.from("match_actions").insert({
     match_id: matchId,
     player_address: agentAddress,
-    agent_name: agentInfo.name,
+    agent_name: agentName,
     action: "commit",
     payload: { roundNumber, commitHash },
   });
