@@ -36,8 +36,26 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
 
     let resolved = false;
 
-    // Check commit timeout
-    if (round.phase === "commit" && round.commit_deadline) {
+    // Commit → reveal: when both commits present, advance immediately (or after deadline)
+    if (round.phase === "commit") {
+      const hasCommit1 = !!round.commit1;
+      const hasCommit2 = !!round.commit2;
+      if (hasCommit1 && hasCommit2) {
+        const revealDeadline = new Date(now + 30 * 1000);
+        await supabase
+          .from("match_rounds")
+          .update({
+            phase: "reveal",
+            reveal_deadline: round.reveal_deadline ?? revealDeadline.toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", round.id);
+        resolved = true;
+      }
+    }
+
+    // Commit timeout: only when deadline passed and commits missing
+    if (!resolved && round.phase === "commit" && round.commit_deadline) {
       const commitDeadline = new Date(round.commit_deadline).getTime();
       if (now > commitDeadline) {
         const hasCommit1 = !!round.commit1;
