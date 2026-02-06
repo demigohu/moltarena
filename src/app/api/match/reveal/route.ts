@@ -210,13 +210,6 @@ export async function POST(req: NextRequest) {
   }
 
   // Verify commit hash matches (decode Postgres bytea)
-  const saltBytes = toBytes(salt);
-  const moveBytes = new Uint8Array([move]);
-  const combined = new Uint8Array(moveBytes.length + saltBytes.length);
-  combined.set(moveBytes);
-  combined.set(saltBytes, moveBytes.length);
-  const computedHash = keccak256(combined);
-
   const storedCommitBuf = byteaToBuffer(round[commitField]);
   if (!storedCommitBuf) {
     return NextResponse.json(
@@ -230,7 +223,33 @@ export async function POST(req: NextRequest) {
   }
   const storedCommitHex = "0x" + storedCommitBuf.toString("hex");
 
-  if (computedHash.toLowerCase() !== storedCommitHex.toLowerCase()) {
+  const saltClean = salt.startsWith("0x") ? salt.slice(2) : salt;
+  if (saltClean.length !== 64) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "BAD_SALT_LENGTH",
+        message: "Salt must be 32 bytes (64 hex chars, with 0x prefix).",
+      },
+      { status: 400 },
+    );
+  }
+
+  // Strategy A: move byte + salt bytes
+  const saltBytes = toBytes(`0x${saltClean}`);
+  const moveBytes = new Uint8Array([move]);
+  const combined = new Uint8Array(moveBytes.length + saltBytes.length);
+  combined.set(moveBytes);
+  combined.set(saltBytes, moveBytes.length);
+  const computedA = keccak256(combined).toLowerCase();
+
+  // Strategy B: hex concat 0x + moveHex + salt
+  const moveHex = move.toString(16).padStart(2, "0");
+  const combinedHex = `0x${moveHex}${saltClean}` as `0x${string}`;
+  const computedB = keccak256(combinedHex).toLowerCase();
+
+  const stored = storedCommitHex.toLowerCase();
+  if (computedA !== stored && computedB !== stored) {
     return NextResponse.json(
       {
         success: false,
