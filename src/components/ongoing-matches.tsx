@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from 'react'
+import { useLiveMatches, type StakeTier } from '@/hooks/useMatches'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 
@@ -8,29 +9,23 @@ type Move = 'rock' | 'paper' | 'scissors'
 
 const moves: Move[] = ['rock', 'paper', 'scissors']
 const ROUND_DURATION_SECONDS = 60
-
-type LiveMatchApi = {
-  matchId: string
-  status: string
-  player1: {
-    address: string
-    name: string | null
-  }
-  player2: {
-    address: string
-    name: string | null
-  } | null
-  stake: number | string
-  wins1: number
-  wins2: number
-  createdAt: number | string
-}
+const STAKE_TIERS: { value: StakeTier | null; label: string }[] = [
+  { value: null, label: 'All tiers' },
+  { value: '0.1', label: '0.1 MON' },
+  { value: '0.5', label: '0.5 MON' },
+  { value: '1', label: '1 MON' },
+  { value: '5', label: '5 MON' },
+]
 
 type UiMatch = {
   id: string
   player1: string
   player2: string
   wagerAmount: number
+  status?: string
+  player1Locked?: boolean
+  player2Locked?: boolean
+  stakeTier?: string
 }
 
 function shorten(addr: string | null | undefined) {
@@ -63,56 +58,33 @@ function moveToIcon(move: Move) {
 }
 
 export function OngoingMatches() {
-  const [matches, setMatches] = useState<UiMatch[]>([])
+  const [stakeTierFilter, setStakeTierFilter] = useState<StakeTier | null>(null)
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null)
   const [agent1Move, setAgent1Move] = useState<Move>('rock')
   const [agent2Move, setAgent2Move] = useState<Move>('scissors')
   const [result, setResult] = useState<'agent1' | 'agent2' | 'draw'>('agent1')
   const [isDialogOpen, setIsDialogOpen] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [roundProgress, setRoundProgress] = useState(0)
 
+  const { data: liveMatches = [], isLoading, error } = useLiveMatches({ stakeTier: stakeTierFilter })
+
+  const matches: UiMatch[] = liveMatches.map((m) => ({
+    id: String(m.matchId),
+    player1: m.player1?.name || shorten(m.player1?.address) || 'Player 1',
+    player2: m.player2
+      ? m.player2.name || shorten(m.player2.address) || 'Player 2'
+      : 'Waiting for opponent',
+    wagerAmount: Number(m.stake ?? 0),
+    status: m.status,
+    player1Locked: m.player1StakeLocked,
+    player2Locked: m.player2StakeLocked,
+    stakeTier: m.stakeTier ?? String(m.stake),
+  }))
+
   useEffect(() => {
-    const fetchLive = async () => {
-      try {
-        const res = await fetch('/api/match/live')
-        if (!res.ok) throw new Error(`Request failed with status ${res.status}`)
-        const json = await res.json()
-        if (!json?.success || !Array.isArray(json.matches)) return
-
-        const mapped: UiMatch[] = json.matches.map((m: LiveMatchApi) => ({
-          id: String(m.matchId),
-          player1: m.player1?.name || shorten(m.player1?.address) || 'Player 1',
-          player2: m.player2
-            ? m.player2.name || shorten(m.player2.address) || 'Player 2'
-            : 'Waiting for opponent',
-          wagerAmount: Number(m.stake ?? 0),
-        }))
-
-        setMatches(mapped)
-        if (mapped.length > 0) {
-          setSelectedMatchId(mapped[0].id)
-        } else {
-          setSelectedMatchId(null)
-        }
-      } catch (err) {
-        console.error('Failed to load live matches', err)
-        setError('Failed to load live matches.')
-        setMatches([])
-        setSelectedMatchId(null)
-      }
-    }
-
-    void fetchLive()
-  }, [])
-
-  // simple looping round timer (~60s) just for visualising time pressure
-  useEffect(() => {
-    const start = Date.now()
     const interval = setInterval(() => {
-      const elapsedSeconds = (Date.now() - start) / 1000
-      const pct = ((elapsedSeconds % ROUND_DURATION_SECONDS) / ROUND_DURATION_SECONDS) * 100
-      setRoundProgress(pct)
+      const elapsedSeconds = (Date.now() / 1000) % ROUND_DURATION_SECONDS
+      setRoundProgress((elapsedSeconds / ROUND_DURATION_SECONDS) * 100)
     }, 500)
     return () => clearInterval(interval)
   }, [])
@@ -159,18 +131,39 @@ export function OngoingMatches() {
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="mb-12">
           <h2 className="text-3xl font-semibold tracking-wider mb-2">Live Matches</h2>
-          <p className="text-muted-foreground">
+          <p className="text-muted-foreground mb-4">
             Ongoing tournaments in real-time with ~60s round timers
           </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-muted-foreground">Stake tier:</span>
+            {STAKE_TIERS.map(({ value, label }) => (
+              <button
+                key={label}
+                type="button"
+                onClick={() => setStakeTierFilter(value)}
+                className={`px-3 py-1.5 text-sm rounded border transition-colors ${
+                  stakeTierFilter === value
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border hover:bg-muted/60'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {error && (
           <p className="mb-4 text-sm text-muted-foreground">
-            {error}
+            {String(error)}
           </p>
         )}
 
-        {!error && matches.length === 0 && (
+        {isLoading && (
+          <p className="mb-4 text-sm text-muted-foreground">Loading matches...</p>
+        )}
+
+        {!isLoading && !error && matches.length === 0 && (
           <p className="mb-6 text-sm text-muted-foreground">
             No live matches right now. Check back soon.
           </p>
@@ -194,10 +187,17 @@ export function OngoingMatches() {
                   <div className="flex items-center gap-2">
                     <span className="inline-block w-2 h-2 rounded-full bg-green-500 animate-pulse" />
                     <span className="text-xs font-medium text-green-500">Live</span>
+                    {match.status && (
+                      <span className="text-[10px] text-muted-foreground px-1.5 py-0.5 bg-muted rounded">
+                        {match.status.replace(/_/g, ' ')}
+                      </span>
+                    )}
                   </div>
                   <div className="text-right">
-                    <div className="text-sm font-semibold">${match.wagerAmount}</div>
-                    <div className="text-xs text-muted-foreground">Per match</div>
+                    <div className="text-sm font-semibold">{match.wagerAmount} MON</div>
+                    <div className="text-xs text-muted-foreground">
+                      Tier {match.stakeTier ?? match.wagerAmount}
+                    </div>
                   </div>
                 </div>
 
@@ -205,7 +205,14 @@ export function OngoingMatches() {
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex-1">
                       <h3 className="font-medium">{match.player1}</h3>
-                      <div className="text-xs text-muted-foreground mt-1">Player 1</div>
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <span className="text-xs text-muted-foreground">Player 1</span>
+                        {match.player1Locked && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-emerald-500/20 text-emerald-600 rounded">
+                            Locked
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
 
@@ -214,7 +221,14 @@ export function OngoingMatches() {
                   <div className="flex items-center justify-between">
                     <div className="flex-1">
                       <h3 className="font-medium">{match.player2}</h3>
-                      <div className="text-xs text-muted-foreground mt-1">Player 2</div>
+                      <div className="flex items-center gap-1.5 mt-1">
+                        <span className="text-xs text-muted-foreground">Player 2</span>
+                        {match.player2Locked && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-emerald-500/20 text-emerald-600 rounded">
+                            Locked
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>

@@ -167,10 +167,11 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
         (updatedMatch.wins1 || 0) >= neededWins
           ? match.player1_address
           : match.player2_address;
+      // Transition to ready_to_settle (need sigs before settleMatch → finished)
       await supabase
         .from("matches")
         .update({
-          status: "finished",
+          status: "ready_to_settle",
           winner_address: winnerAddress,
           updated_at: new Date().toISOString(),
         })

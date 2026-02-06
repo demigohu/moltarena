@@ -5,10 +5,12 @@ import { RPS_ARENA_ADDRESS } from "@/app/api/_lib/monadClient";
 import { keccak256, toBytes, toHex } from "viem";
 import { isAddress } from "viem";
 
-const MIN_STAKE = "0.1"; // Fixed stake per match
+const STAKE_TIERS = [0.1, 0.5, 1, 5] as const;
+const DEFAULT_STAKE = "0.1";
 
 type JoinBody = {
   address?: string; // Wallet address from agent's Monad wallet (required)
+  stake?: number | string; // Optional: 0.1, 0.5, 1, or 5 MON
 };
 
 export async function POST(req: NextRequest) {
@@ -39,6 +41,11 @@ export async function POST(req: NextRequest) {
   }
 
   const agentAddress = body.address;
+  const requestedStake = body.stake;
+  const stake =
+    requestedStake !== undefined && STAKE_TIERS.includes(Number(requestedStake) as (typeof STAKE_TIERS)[number])
+      ? String(Number(requestedStake))
+      : DEFAULT_STAKE;
   if (!agentAddress) {
     return NextResponse.json(
       {
@@ -93,7 +100,7 @@ export async function POST(req: NextRequest) {
   // Check if agent already has an active match (lobby or in_progress)
   const { data: existingMatch } = await supabase
     .from("matches")
-    .select("id, status, player1_address, player2_address")
+    .select("id, status, player1_address, player2_address, stake")
     .or(
       `player1_address.eq.${normalizedAddress},player2_address.eq.${normalizedAddress}`
     )
@@ -114,7 +121,7 @@ export async function POST(req: NextRequest) {
       success: true,
       matchId: existingMatch.id,
       matchIdBytes32: matchIdBytes32,
-      stake: MIN_STAKE,
+      stake: existingMatch.stake ?? stake,
       role,
       message: `You are already in a match (${existingMatch.status}).`,
     });
@@ -123,10 +130,10 @@ export async function POST(req: NextRequest) {
   // Look for an open lobby (status='lobby', player2 is null, stake matches)
   const { data: openLobby } = await supabase
     .from("matches")
-    .select("id, player1_address")
+    .select("id, player1_address, stake")
     .eq("status", "lobby")
     .is("player2_address", null)
-    .eq("stake", MIN_STAKE)
+    .eq("stake", stake)
     .neq("player1_address", normalizedAddress)
     .order("created_at", { ascending: true })
     .limit(1)
@@ -164,7 +171,8 @@ export async function POST(req: NextRequest) {
       .from("matches")
       .insert({
         status: "lobby",
-        stake: MIN_STAKE,
+        stake,
+        stake_tier: stake,
         player1_address: normalizedAddress,
         player1_name: agentName,
         best_of: 5,
@@ -203,16 +211,16 @@ export async function POST(req: NextRequest) {
     success: true,
     matchId,
     matchIdBytes32,
-    stake: MIN_STAKE,
+    stake,
     role,
-    message: `Match ${role === "player1" ? "created" : "joined"}. You must now call RPSArena.stakeForMatch(bytes32 matchId) on-chain with value = 0.1 MON.`,
+    message: `Match ${role === "player1" ? "created" : "joined"}. You must now call RPSArena.stakeForMatch(bytes32 matchId) on-chain with value = ${stake} MON.`,
     onchain: {
       chainId: 10143,
       contractAddress: RPS_ARENA_ADDRESS,
       function: "stakeForMatch(bytes32 matchId)",
       matchIdBytes32,
-      value: "0.1", // MON
-      notes: `Use Monad Development Skill to send a transaction: value = 0.1 MON (in wei), args = [${matchIdBytes32}]. Both players must stake before the game can start.`,
+      value: stake, // MON
+      notes: `Use Monad Development Skill to send a transaction: value = ${stake} MON (in wei), args = [${matchIdBytes32}]. Both players must stake before the game can start.`,
     },
   });
 }

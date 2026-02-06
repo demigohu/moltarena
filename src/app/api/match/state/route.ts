@@ -2,8 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMoltbookAuth } from "@/app/api/_lib/moltArenaAuth";
 import { supabase } from "@/app/api/_lib/supabase";
 import { isAddress } from "viem";
+import { keccak256, toBytes } from "viem";
 import { checkOnChainStake, isStakeReady } from "@/app/api/_lib/stakeVerifier";
 import { checkAndResolveTimeouts, createRound1 } from "@/app/api/_lib/matchResolver";
+import { getNextActionForPlayer, buildMatchResult, type MatchRow, type RoundRow } from "@/app/api/_lib/nextActionHelper";
 
 export async function GET(req: NextRequest) {
   let agent;
@@ -56,11 +58,11 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // Fetch match
+  // Fetch match (include stake lock status and sigs for ready_to_settle)
   const { data: match, error: matchError } = await supabase
     .from("matches")
     .select(
-      "id, status, stake, best_of, player1_address, player2_address, player1_name, player2_name, wins1, wins2, winner_address, created_at"
+      "id, status, stake, stake_tier, best_of, player1_address, player2_address, player1_name, player2_name, wins1, wins2, winner_address, player1_stake_locked, player2_stake_locked, sig1, sig2, onchain_match_id, chain_id, created_at"
     )
     .eq("id", matchId)
     .single();
@@ -114,7 +116,7 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // STAKE VERIFICATION: Check on-chain stake and auto-transition lobby → in_progress
+  // STAKE VERIFICATION: Check on-chain stake and auto-transition lobby → stake_locked → in_progress
   if (match.status === "lobby") {
     const lockedMatch = await checkOnChainStake(matchId);
     console.log(`[${matchId}] Stake check:`, {
@@ -129,8 +131,10 @@ export async function GET(req: NextRequest) {
 
     if (isStakeReady(lockedMatch)) {
       console.log(`[${matchId}] Both players staked! Transitioning to in_progress...`);
-      
-      // Both players staked on-chain → transition to in_progress and create round 1
+      const matchIdBytes32 = keccak256(toBytes(matchId));
+      const chainId = 10143; // Monad testnet
+
+      // Both players staked on-chain → update lock fields, transition to in_progress, create round 1
       const { data: existingRound1 } = await supabase
         .from("match_rounds")
         .select("id")
@@ -139,36 +143,32 @@ export async function GET(req: NextRequest) {
         .single();
 
       if (!existingRound1) {
-        // Create round 1 with commit deadline starting now
         console.log(`[${matchId}] Creating round 1...`);
         await createRound1(matchId);
       }
 
-      // Update match status to in_progress
       const { error: updateError } = await supabase
         .from("matches")
         .update({
           status: "in_progress",
+          player1_stake_locked: true,
+          player2_stake_locked: true,
+          onchain_match_id: matchIdBytes32,
+          chain_id: chainId,
+          stake_tier: String(match.stake),
           updated_at: new Date().toISOString(),
         })
         .eq("id", matchId);
 
       if (updateError) {
-        console.error(`[${matchId}] Failed to update status to in_progress:`, updateError);
+        console.error(`[${matchId}] Failed to update status:`, updateError);
       } else {
-        console.log(`[${matchId}] Status updated to in_progress`);
-        // Re-fetch match to get updated status
-        const { data: updatedMatch } = await supabase
-          .from("matches")
-          .select("status")
-          .eq("id", matchId)
-          .single();
-        if (updatedMatch) {
-          match.status = updatedMatch.status as typeof match.status;
-        }
+        match.status = "in_progress";
+        match.player1_stake_locked = true;
+        match.player2_stake_locked = true;
+        match.onchain_match_id = matchIdBytes32;
+        match.chain_id = chainId;
       }
-    } else {
-      console.log(`[${matchId}] Stake not ready yet. Player1: ${lockedMatch?.player1Locked}, Player2: ${lockedMatch?.player2Locked}`);
     }
   }
 
@@ -196,6 +196,15 @@ export async function GET(req: NextRequest) {
   const currentRound = rounds?.find((r) => r.phase !== "done");
   const currentRoundNumber = currentRound?.round_number ?? null;
 
+  // Merge on-chain stake lock status for lobby (DB may not have it yet)
+  if (match.status === "lobby") {
+    const lockedMatch = await checkOnChainStake(matchId);
+    if (lockedMatch) {
+      match.player1_stake_locked = lockedMatch.player1Locked;
+      match.player2_stake_locked = lockedMatch.player2Locked;
+    }
+  }
+
   // Build round states
   const roundStates = rounds?.map((r) => {
     const myCommit = isPlayer1 ? r.commit1 : r.commit2;
@@ -218,72 +227,39 @@ export async function GET(req: NextRequest) {
     };
   });
 
-  // Determine action needed (after potential status update)
-  let actionNeeded: string | null = null;
-  
-  // Re-check status in case it was updated above
-  if (match.status === "lobby") {
-    // Double-check stake status
-    const lockedMatch = await checkOnChainStake(matchId);
-    if (isStakeReady(lockedMatch)) {
-      // Both staked but status still lobby - might be transitioning
-      // Check if round 1 exists
-      const { data: round1 } = await supabase
-        .from("match_rounds")
-        .select("id, phase")
-        .eq("match_id", matchId)
-        .eq("round_number", 1)
-        .single();
-      
-      if (round1) {
-        // Round 1 exists, should be in_progress
-        actionNeeded = round1.phase === "commit" ? "commit" : "wait_reveal";
-      } else {
-        actionNeeded = "stake"; // Still waiting for transition
-      }
-    } else {
-      actionNeeded = "stake"; // Need to stake on-chain
-    }
-  } else if (match.status === "in_progress") {
-    if (!currentRound) {
-      // All rounds done, match should be finished
-      actionNeeded = "finalize";
-    } else if (currentRound.phase === "commit") {
-      const myCommit = isPlayer1
-        ? currentRound.commit1
-        : currentRound.commit2;
-      if (!myCommit) {
-        actionNeeded = "commit";
-      } else if (
-        currentRound.commit_deadline &&
-        new Date(currentRound.commit_deadline).getTime() < Date.now()
-      ) {
-        actionNeeded = "timeout"; // Opponent timeout
-      } else {
-        actionNeeded = "wait_reveal"; // Wait for opponent commit
-      }
-    } else if (currentRound.phase === "reveal") {
-      const myMove = isPlayer1 ? currentRound.move1 : currentRound.move2;
-      if (!myMove) {
-        actionNeeded = "reveal";
-      } else if (
-        currentRound.reveal_deadline &&
-        new Date(currentRound.reveal_deadline).getTime() < Date.now()
-      ) {
-        actionNeeded = "timeout"; // Opponent timeout
-      } else {
-        actionNeeded = "wait_result"; // Wait for opponent reveal
-      }
-    } else if (currentRound.phase === "done") {
-      // Round done, check if match finished
-      actionNeeded = "wait_result"; // Wait for next round or match finish
-    }
-  } else if (match.status === "finished") {
-    if (!match.winner_address) {
-      actionNeeded = "finalize";
-    } else {
-      actionNeeded = null; // Match fully finished
-    }
+  // Use next-action helper for consistent action logic
+  const matchRow: MatchRow = {
+    id: match.id,
+    status: match.status as MatchRow["status"],
+    stake: match.stake,
+    best_of: match.best_of,
+    player1_address: match.player1_address,
+    player2_address: match.player2_address,
+    wins1: match.wins1 ?? 0,
+    wins2: match.wins2 ?? 0,
+    winner_address: match.winner_address,
+    player1_stake_locked: match.player1_stake_locked,
+    player2_stake_locked: match.player2_stake_locked,
+    sig1: match.sig1,
+    sig2: match.sig2,
+  };
+  const roundRows: RoundRow[] = (rounds ?? []).map((r) => ({
+    round_number: r.round_number,
+    phase: r.phase as RoundRow["phase"],
+    commit1: r.commit1 as Uint8Array | null,
+    commit2: r.commit2 as Uint8Array | null,
+    move1: r.move1,
+    move2: r.move2,
+    result: r.result,
+    commit_deadline: r.commit_deadline,
+    reveal_deadline: r.reveal_deadline,
+  }));
+  const nextAction = getNextActionForPlayer(matchRow, roundRows, agentAddress);
+
+  // Build matchResult for ready_to_settle (for signing)
+  let matchResult = null;
+  if (match.status === "ready_to_settle" && match.winner_address) {
+    matchResult = buildMatchResult(matchRow, roundRows);
   }
 
   return NextResponse.json({
@@ -292,6 +268,7 @@ export async function GET(req: NextRequest) {
       id: match.id,
       status: match.status,
       stake: match.stake,
+      stakeTier: match.stake_tier ?? String(match.stake),
       bestOf: match.best_of,
       role,
       opponent: {
@@ -301,10 +278,23 @@ export async function GET(req: NextRequest) {
       wins1: match.wins1,
       wins2: match.wins2,
       winner: match.winner_address,
+      player1StakeLocked: match.player1_stake_locked,
+      player2StakeLocked: match.player2_stake_locked,
+      onchainMatchId: match.onchain_match_id,
+      chainId: match.chain_id,
       createdAt: match.created_at,
     },
     currentRoundNumber,
     rounds: roundStates,
-    actionNeeded,
+    actionNeeded: nextAction.action === "done" ? null : nextAction.action,
+    nextAction: {
+      action: nextAction.action,
+      message: nextAction.message,
+      roundNumber: nextAction.roundNumber,
+      deadline: nextAction.deadline,
+      canCommit: nextAction.canCommit,
+      canReveal: nextAction.canReveal,
+    },
+    ...(matchResult && { matchResult }),
   });
 }

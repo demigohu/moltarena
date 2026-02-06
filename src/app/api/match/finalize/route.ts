@@ -4,11 +4,13 @@ import { supabase } from "@/app/api/_lib/supabase";
 import { RPS_ARENA_ADDRESS } from "@/app/api/_lib/monadClient";
 import { keccak256, toBytes } from "viem";
 import { isAddress } from "viem";
+import { buildMatchResult, type MatchRow, type RoundRow } from "@/app/api/_lib/nextActionHelper";
 
 type FinalizeBody = {
   matchId: string;
   transcriptHash?: string; // Optional hex string (0x...)
   address: string; // Agent's Monad wallet address
+  signature?: string; // hex (0x...) - store for settleMatch
 };
 
 export async function POST(req: NextRequest) {
@@ -37,7 +39,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { matchId, transcriptHash, address } = body;
+  const { matchId, transcriptHash, address, signature } = body;
 
   if (!matchId || !address) {
     return NextResponse.json(
@@ -71,11 +73,11 @@ export async function POST(req: NextRequest) {
     agentName = `Agent-${agentAddress.slice(0, 8)}`;
   }
 
-  // Fetch match
+  // Fetch match and rounds
   const { data: match, error: matchError } = await supabase
     .from("matches")
     .select(
-      "id, status, stake, best_of, player1_address, player2_address, wins1, wins2, winner_address, transcript_hash"
+      "id, status, stake, best_of, player1_address, player2_address, wins1, wins2, winner_address, transcript_hash, sig1, sig2"
     )
     .eq("id", matchId)
     .single();
@@ -105,12 +107,13 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  if (match.status !== "finished") {
+  // Accept ready_to_settle (need sigs) or finished (already settled)
+  if (match.status !== "ready_to_settle" && match.status !== "finished") {
     return NextResponse.json(
       {
         success: false,
         error: "INVALID_STATE",
-        message: `Match is not finished (status: ${match.status}).`,
+        message: `Match must be ready_to_settle (status: ${match.status}).`,
       },
       { status: 400 },
     );
@@ -127,6 +130,39 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const { data: rounds } = await supabase
+    .from("match_rounds")
+    .select("round_number, phase, move1, move2, result")
+    .eq("match_id", matchId)
+    .order("round_number", { ascending: true });
+
+  const matchRow: MatchRow = {
+    id: match.id,
+    status: match.status as MatchRow["status"],
+    stake: match.stake,
+    best_of: match.best_of,
+    player1_address: match.player1_address,
+    player2_address: match.player2_address,
+    wins1: match.wins1 ?? 0,
+    wins2: match.wins2 ?? 0,
+    winner_address: match.winner_address,
+    sig1: match.sig1,
+    sig2: match.sig2,
+  };
+  const roundRows: RoundRow[] = (rounds ?? []).map((r) => ({
+    round_number: r.round_number,
+    phase: r.phase as RoundRow["phase"],
+    commit1: null,
+    commit2: null,
+    move1: r.move1,
+    move2: r.move2,
+    result: r.result,
+    commit_deadline: null,
+    reveal_deadline: null,
+  }));
+
+  const matchResult = buildMatchResult(matchRow, roundRows);
+
   // Update transcript hash if provided
   if (transcriptHash) {
     const transcriptBytes = Buffer.from(transcriptHash.slice(2), "hex");
@@ -139,24 +175,16 @@ export async function POST(req: NextRequest) {
       .eq("id", matchId);
   }
 
-  // Prepare MatchResult for EIP-712 signing
-  const matchIdBytes32 = keccak256(toBytes(matchId));
-  const stakeWei = BigInt(Math.floor(parseFloat(match.stake) * 1e18));
+  const isPlayer1 = match.player1_address.toLowerCase() === agentAddress;
 
-  const matchResult = {
-    matchId: matchIdBytes32,
-    player1: match.player1_address,
-    player2: match.player2_address,
-    winner: match.winner_address,
-    stake: stakeWei.toString(),
-    bestOf: match.best_of,
-    wins1: match.wins1,
-    wins2: match.wins2,
-    transcriptHash: match.transcript_hash
-      ? "0x" + Buffer.from(match.transcript_hash as Uint8Array).toString("hex")
-      : keccak256(toBytes(matchId)), // fallback
-    nonce: 1, // Can be incremented if needed
-  };
+  // Store signature if provided
+  if (signature && signature.startsWith("0x")) {
+    const updatePayload: Record<string, unknown> = {
+      updated_at: new Date().toISOString(),
+      ...(isPlayer1 ? { sig1: signature } : { sig2: signature }),
+    };
+    await supabase.from("matches").update(updatePayload).eq("id", matchId);
+  }
 
   // Log action
   await supabase.from("match_actions").insert({
@@ -164,18 +192,32 @@ export async function POST(req: NextRequest) {
     player_address: agentAddress,
     agent_name: agentName,
     action: "finalize",
-    payload: { matchResult },
+    payload: { matchResult, signature: signature ? "0x..." : undefined },
   });
+
+  const chainId = 10143; // Monad testnet
+  const sig1Now = isPlayer1 && signature ? signature : match.sig1;
+  const sig2Now = !isPlayer1 && signature ? signature : match.sig2;
+  const hasBothSigs = !!(sig1Now && sig2Now);
 
   return NextResponse.json({
     success: true,
-    message: "Match finalized. Both players must sign MatchResult with EIP-712 and call settleMatch on-chain.",
+    message: hasBothSigs
+      ? "Both signatures ready. Call settleMatch on-chain."
+      : "Signature stored. Both players must sign MatchResult with EIP-712.",
     matchResult,
+    domain: {
+      name: "RPSArena",
+      version: "1",
+      chainId,
+      verifyingContract: RPS_ARENA_ADDRESS,
+    },
     onchain: {
-      chainId: 10143,
+      chainId,
       contractAddress: RPS_ARENA_ADDRESS,
       function: "settleMatch(MatchResult result, bytes sigPlayer1, bytes sigPlayer2)",
       notes: "Use EIP-712 typed data signing for MatchResult struct. Both signatures required.",
+      hasBothSignatures: hasBothSigs,
     },
   });
 }

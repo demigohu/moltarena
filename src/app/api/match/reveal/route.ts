@@ -286,15 +286,16 @@ export async function POST(req: NextRequest) {
       })
       .eq("id", matchId);
 
-    // Check if match is finished (best-of-5: first to 3 wins)
+    // Check if match is finished (best-of: first to neededWins)
     const neededWins = Math.ceil(match.best_of / 2);
     if (newWins1 >= neededWins || newWins2 >= neededWins) {
       const winnerAddress =
         newWins1 >= neededWins ? match.player1_address : match.player2_address;
+      // Transition to ready_to_settle (need sig1+sig2 before settleMatch → finished)
       await supabase
         .from("matches")
         .update({
-          status: "finished",
+          status: "ready_to_settle",
           winner_address: winnerAddress,
           updated_at: new Date().toISOString(),
         })

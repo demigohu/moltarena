@@ -1,16 +1,28 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/app/api/_lib/supabase";
 
-export async function GET() {
-  // Fetch live matches from Supabase (lobby + in_progress)
-  const { data: matches, error } = await supabase
+const VALID_TIERS = ["0.1", "0.5", "1", "5"];
+const VALID_STATUSES = ["lobby", "stake_locked", "in_progress", "ready_to_settle"];
+
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const stakeTier = searchParams.get("stake_tier"); // 0.1, 0.5, 1, 5
+  const statusFilter = searchParams.get("status"); // comma-separated or single
+
+  let query = supabase
     .from("matches")
     .select(
-      "id, status, stake, player1_address, player2_address, player1_name, player2_name, wins1, wins2, created_at"
+      "id, status, stake, stake_tier, player1_address, player2_address, player1_name, player2_name, wins1, wins2, player1_stake_locked, player2_stake_locked, created_at"
     )
-    .in("status", ["lobby", "in_progress"])
-    .order("created_at", { ascending: false })
+    .in("status", statusFilter ? statusFilter.split(",") : ["lobby", "stake_locked", "in_progress"])
+    .order("updated_at", { ascending: false })
     .limit(50);
+
+  if (stakeTier && VALID_TIERS.includes(stakeTier)) {
+    query = query.eq("stake", parseFloat(stakeTier));
+  }
+
+  const { data: matches, error } = await query;
 
   if (error) {
     return NextResponse.json(
@@ -29,6 +41,8 @@ export async function GET() {
     matches: (matches ?? []).map((m) => ({
       matchId: m.id,
       status: m.status,
+      stake: m.stake,
+      stakeTier: m.stake_tier ?? String(m.stake),
       player1: {
         address: m.player1_address,
         name: m.player1_name,
@@ -39,9 +53,10 @@ export async function GET() {
             name: m.player2_name,
           }
         : null,
-      stake: m.stake,
-      wins1: m.wins1,
-      wins2: m.wins2,
+      player1StakeLocked: m.player1_stake_locked ?? false,
+      player2StakeLocked: m.player2_stake_locked ?? false,
+      wins1: m.wins1 ?? 0,
+      wins2: m.wins2 ?? 0,
       createdAt: m.created_at,
     })),
   });
