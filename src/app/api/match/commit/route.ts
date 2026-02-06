@@ -181,6 +181,18 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Guard: round must be in commit phase
+  if (round && round.phase !== "commit") {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "INVALID_PHASE",
+        message: `Round is in '${round.phase}' phase. Commit only allowed in 'commit' phase.`,
+      },
+      { status: 400 },
+    );
+  }
+
   const isPlayer1 = match.player1_address.toLowerCase() === agentAddress;
   const commitField = isPlayer1 ? "commit1" : "commit2";
 

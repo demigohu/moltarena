@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMoltbookAuth, getAgentName } from "@/app/api/_lib/moltArenaAuth";
 import { supabase } from "@/app/api/_lib/supabase";
 import { RPS_ARENA_ADDRESS } from "@/app/api/_lib/monadClient";
-import { keccak256, toBytes, toHex } from "viem";
+import { keccak256, toBytes } from "viem";
 import { isAddress } from "viem";
 
 const STAKE_TIERS = [0.1, 0.5, 1, 5] as const;
@@ -150,6 +150,7 @@ export async function POST(req: NextRequest) {
       .update({
         player2_address: normalizedAddress,
         player2_name: agentName,
+        chain_id: 10143,
         // Keep status as "lobby" - will transition to "in_progress" after stake verification
         updated_at: new Date().toISOString(),
       })
@@ -173,6 +174,7 @@ export async function POST(req: NextRequest) {
         status: "lobby",
         stake,
         stake_tier: stake,
+        chain_id: 10143,
         player1_address: normalizedAddress,
         player1_name: agentName,
         best_of: 5,

@@ -163,8 +163,18 @@ export async function POST(req: NextRequest) {
 
   const matchResult = buildMatchResult(matchRow, roundRows);
 
-  // Update transcript hash if provided
+  // Validate transcriptHash if provided: must be hex 0x + 64 chars
   if (transcriptHash) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(transcriptHash)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "BAD_REQUEST",
+          message: "Invalid transcriptHash. Must be hex string 0x followed by 64 hex chars.",
+        },
+        { status: 400 },
+      );
+    }
     const transcriptBytes = Buffer.from(transcriptHash.slice(2), "hex");
     await supabase
       .from("matches")
@@ -186,6 +196,18 @@ export async function POST(req: NextRequest) {
     await supabase.from("matches").update(updatePayload).eq("id", matchId);
   }
 
+  const sig1Now = isPlayer1 && signature ? signature : match.sig1;
+  const sig2Now = !isPlayer1 && signature ? signature : match.sig2;
+  const hasBothSigs = !!(sig1Now && sig2Now);
+
+  // If both sigs present, ensure status is at least ready_to_settle
+  if (hasBothSigs && match.status !== "ready_to_settle" && match.status !== "finished") {
+    await supabase
+      .from("matches")
+      .update({ status: "ready_to_settle", updated_at: new Date().toISOString() })
+      .eq("id", matchId);
+  }
+
   // Log action
   await supabase.from("match_actions").insert({
     match_id: matchId,
@@ -196,9 +218,6 @@ export async function POST(req: NextRequest) {
   });
 
   const chainId = 10143; // Monad testnet
-  const sig1Now = isPlayer1 && signature ? signature : match.sig1;
-  const sig2Now = !isPlayer1 && signature ? signature : match.sig2;
-  const hasBothSigs = !!(sig1Now && sig2Now);
 
   return NextResponse.json({
     success: true,

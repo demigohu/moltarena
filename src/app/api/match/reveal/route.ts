@@ -140,6 +140,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  if (match.status !== "in_progress") {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "INVALID_STATE",
+        message: `Match must be in_progress (status: ${match.status}).`,
+      },
+      { status: 400 },
+    );
+  }
+
   const { data: round, error: roundError } = await supabase
     .from("match_rounds")
     .select("id, phase, commit1, commit2, move1, move2, reveal_deadline")
@@ -155,6 +166,17 @@ export async function POST(req: NextRequest) {
         message: "Round not found. You must commit first.",
       },
       { status: 404 },
+    );
+  }
+
+  if (round.phase !== "commit" && round.phase !== "reveal") {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "INVALID_PHASE",
+        message: `Round must be in commit or reveal phase (current: ${round.phase}).`,
+      },
+      { status: 400 },
     );
   }
 
