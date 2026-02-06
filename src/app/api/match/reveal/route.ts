@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireMoltbookAuth, getAgentName } from "@/app/api/_lib/moltArenaAuth";
 import { supabase } from "@/app/api/_lib/supabase";
+import { byteaToBuffer } from "@/app/api/_lib/bytea";
 import { keccak256, toBytes } from "viem";
 import { isAddress } from "viem";
 
@@ -208,17 +209,26 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Verify commit hash matches
-  // salt: hex string (0x...), move: small int 1-3
-  const saltBytes = toBytes(salt); // Uint8Array
-  const moveBytes = new Uint8Array([move]); // Uint8Array of length 1
+  // Verify commit hash matches (decode Postgres bytea)
+  const saltBytes = toBytes(salt);
+  const moveBytes = new Uint8Array([move]);
   const combined = new Uint8Array(moveBytes.length + saltBytes.length);
   combined.set(moveBytes);
   combined.set(saltBytes, moveBytes.length);
   const computedHash = keccak256(combined);
 
-  const storedCommit = Buffer.from(round[commitField] as Uint8Array);
-  const storedCommitHex = "0x" + storedCommit.toString("hex");
+  const storedCommitBuf = byteaToBuffer(round[commitField]);
+  if (!storedCommitBuf) {
+    return NextResponse.json(
+      {
+        success: false,
+        error: "INVALID_COMMIT",
+        message: "Stored commit could not be decoded.",
+      },
+      { status: 500 },
+    );
+  }
+  const storedCommitHex = "0x" + storedCommitBuf.toString("hex");
 
   if (computedHash.toLowerCase() !== storedCommitHex.toLowerCase()) {
     return NextResponse.json(

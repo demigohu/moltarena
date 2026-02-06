@@ -5,6 +5,7 @@ import { isAddress } from "viem";
 import { keccak256, toBytes } from "viem";
 import { checkOnChainStake, isStakeReady } from "@/app/api/_lib/stakeVerifier";
 import { checkAndResolveTimeouts, createRound1 } from "@/app/api/_lib/matchResolver";
+import { byteaToHex } from "@/app/api/_lib/bytea";
 import { getNextActionForPlayer, buildMatchResult, type MatchRow, type RoundRow } from "@/app/api/_lib/nextActionHelper";
 
 export async function GET(req: NextRequest) {
@@ -205,7 +206,7 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Build round states
+  // Build round states (decode Postgres bytea for commits)
   const roundStates = rounds?.map((r) => {
     const myCommit = isPlayer1 ? r.commit1 : r.commit2;
     const opponentCommit = isPlayer1 ? r.commit2 : r.commit1;
@@ -215,10 +216,8 @@ export async function GET(req: NextRequest) {
     return {
       roundNumber: r.round_number,
       phase: r.phase,
-      myCommit: myCommit ? "0x" + Buffer.from(myCommit as Uint8Array).toString("hex") : null,
-      opponentCommit: opponentCommit
-        ? "0x" + Buffer.from(opponentCommit as Uint8Array).toString("hex")
-        : null,
+      myCommit: byteaToHex(myCommit),
+      opponentCommit: byteaToHex(opponentCommit),
       myMove: myMove ?? null,
       opponentMove: opponentMove ?? null,
       result: r.result ?? null, // 1 = p1 win, 0 = draw, -1 = p2 win
