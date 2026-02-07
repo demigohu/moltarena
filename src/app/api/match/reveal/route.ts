@@ -154,7 +154,7 @@ export async function POST(req: NextRequest) {
 
   const { data: round, error: roundError } = await supabase
     .from("match_rounds")
-    .select("id, phase, commit1, commit2, move1, move2, reveal_deadline")
+    .select("id, phase, commit1, commit2, commit1_hex, commit2_hex, move1, move2, reveal_deadline")
     .eq("match_id", matchId)
     .eq("round_number", roundNumber)
     .single();
@@ -183,15 +183,26 @@ export async function POST(req: NextRequest) {
 
   const isPlayer1 = match.player1_address.toLowerCase() === agentAddress;
   const commitField = isPlayer1 ? "commit1" : "commit2";
+  const commitHexField = isPlayer1 ? "commit1_hex" : "commit2_hex";
   const moveField = isPlayer1 ? "move1" : "move2";
 
-  // Verify commit exists
-  if (!round[commitField]) {
+  // Resolve stored commit: prefer _hex; fallback to bytea if valid 32 bytes
+  const hexVal = round[commitHexField];
+  const byteaVal = round[commitField];
+  let storedCommitHex: string | null = null;
+  if (hexVal && typeof hexVal === "string" && /^0x[0-9a-fA-F]{64}$/.test(hexVal)) {
+    storedCommitHex = hexVal;
+  } else {
+    const buf = byteaToBuffer(byteaVal);
+    if (buf && buf.length === 32) storedCommitHex = "0x" + buf.toString("hex");
+  }
+
+  if (!storedCommitHex || storedCommitHex.length !== 66) {
     return NextResponse.json(
       {
         success: false,
-        error: "NOT_COMMITTED",
-        message: "You must commit before revealing.",
+        error: "INVALID_COMMIT",
+        message: "Stored commit missing or invalid (must be 0x + 64 hex chars).",
       },
       { status: 400 },
     );
@@ -208,20 +219,6 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-
-  // Verify commit hash matches (decode Postgres bytea)
-  const storedCommitBuf = byteaToBuffer(round[commitField]);
-  if (!storedCommitBuf) {
-    return NextResponse.json(
-      {
-        success: false,
-        error: "INVALID_COMMIT",
-        message: "Stored commit could not be decoded.",
-      },
-      { status: 500 },
-    );
-  }
-  const storedCommitHex = "0x" + storedCommitBuf.toString("hex");
 
   const saltClean = salt.startsWith("0x") ? salt.slice(2) : salt;
   if (saltClean.length !== 64) {

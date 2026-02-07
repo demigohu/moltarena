@@ -164,7 +164,7 @@ export async function POST(req: NextRequest) {
   // Check if round exists, create if not
   const { data: round, error: roundFetchError } = await supabase
     .from("match_rounds")
-    .select("id, phase, commit1, commit2, commit_deadline")
+    .select("id, phase, commit1, commit2, commit1_hex, commit2_hex, commit_deadline")
     .eq("match_id", matchId)
     .eq("round_number", roundNumber)
     .single();
@@ -195,9 +195,11 @@ export async function POST(req: NextRequest) {
 
   const isPlayer1 = match.player1_address.toLowerCase() === agentAddress;
   const commitField = isPlayer1 ? "commit1" : "commit2";
+  const commitHexField = isPlayer1 ? "commit1_hex" : "commit2_hex";
 
-  // Check if already committed
-  if (round && round[commitField]) {
+  // Check if already committed (check _hex first, then bytea)
+  const alreadyCommitted = round && (round[commitHexField] || round[commitField]);
+  if (alreadyCommitted) {
     return NextResponse.json(
       {
         success: false,
@@ -252,52 +254,66 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Convert hex string to bytea
-  const commitHashBytes = Buffer.from(commitHash.slice(2), "hex");
+  // Normalize hex (0x + 64 chars)
+  const commitHashNorm = commitHash.startsWith("0x") ? commitHash : "0x" + commitHash;
 
   // Set deadline: 30s from now
   const commitDeadline = new Date(Date.now() + 30 * 1000);
 
+  // Postgres bytea hex format: \x + hex
+  const byteaHex = "\\x" + commitHashNorm.slice(2);
+
   if (round) {
-    // Update existing round
     const { error: updateError } = await supabase
       .from("match_rounds")
       .update({
-        [commitField]: commitHashBytes,
+        [commitHexField]: commitHashNorm,
+        [commitField]: byteaHex,
         commit_deadline: commitDeadline.toISOString(),
         updated_at: new Date().toISOString(),
       })
       .eq("id", round.id);
 
     if (updateError) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "DATABASE_ERROR",
-          message: "Failed to update round commit.",
-        },
-        { status: 500 },
-      );
+      const { error: retryError } = await supabase
+        .from("match_rounds")
+        .update({
+          [commitHexField]: commitHashNorm,
+          commit_deadline: commitDeadline.toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", round.id);
+      if (retryError) {
+        return NextResponse.json(
+          { success: false, error: "DATABASE_ERROR", message: "Failed to update round commit." },
+          { status: 500 },
+        );
+      }
     }
   } else {
-    // Create new round
     const { error: insertError } = await supabase.from("match_rounds").insert({
       match_id: matchId,
       round_number: roundNumber,
-      [commitField]: commitHashBytes,
+      [commitHexField]: commitHashNorm,
+      [commitField]: byteaHex,
       phase: "commit",
       commit_deadline: commitDeadline.toISOString(),
     });
 
     if (insertError) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "DATABASE_ERROR",
-          message: "Failed to create round.",
-        },
-        { status: 500 },
-      );
+      const { error: retryError } = await supabase.from("match_rounds").insert({
+        match_id: matchId,
+        round_number: roundNumber,
+        [commitHexField]: commitHashNorm,
+        phase: "commit",
+        commit_deadline: commitDeadline.toISOString(),
+      });
+      if (retryError) {
+        return NextResponse.json(
+          { success: false, error: "DATABASE_ERROR", message: "Failed to create round commit." },
+          { status: 500 },
+        );
+      }
     }
   }
 

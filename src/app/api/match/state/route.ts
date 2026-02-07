@@ -177,7 +177,7 @@ export async function GET(req: NextRequest) {
   const { data: rounds, error: roundsError } = await supabase
     .from("match_rounds")
     .select(
-      "round_number, phase, commit1, commit2, move1, move2, result, commit_deadline, reveal_deadline"
+      "round_number, phase, commit1, commit2, commit1_hex, commit2_hex, move1, move2, result, commit_deadline, reveal_deadline"
     )
     .eq("match_id", matchId)
     .order("round_number", { ascending: true });
@@ -206,18 +206,27 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // Build round states (decode Postgres bytea for commits)
+  // Build round states: prefer commit*_hex; fallback to decoded bytea if 32 bytes
   const roundStates = rounds?.map((r) => {
-    const myCommit = isPlayer1 ? r.commit1 : r.commit2;
-    const opponentCommit = isPlayer1 ? r.commit2 : r.commit1;
+    const myHex = isPlayer1 ? r.commit1_hex : r.commit2_hex;
+    const oppHex = isPlayer1 ? r.commit2_hex : r.commit1_hex;
+    const myBytea = isPlayer1 ? r.commit1 : r.commit2;
+    const oppBytea = isPlayer1 ? r.commit2 : r.commit1;
     const myMove = isPlayer1 ? r.move1 : r.move2;
     const opponentMove = isPlayer1 ? r.move2 : r.move1;
+
+    const resolveCommit = (hexVal: unknown, byteaVal: unknown) => {
+      if (hexVal && typeof hexVal === "string" && /^0x[0-9a-fA-F]{64}$/.test(hexVal)) return hexVal;
+      const decoded = byteaToHex(byteaVal);
+      if (decoded && decoded.length === 66) return decoded;
+      return null;
+    };
 
     return {
       roundNumber: r.round_number,
       phase: r.phase,
-      myCommit: byteaToHex(myCommit),
-      opponentCommit: byteaToHex(opponentCommit),
+      myCommit: resolveCommit(myHex, myBytea),
+      opponentCommit: resolveCommit(oppHex, oppBytea),
       myMove: myMove ?? null,
       opponentMove: opponentMove ?? null,
       result: r.result ?? null, // 1 = p1 win, 0 = draw, -1 = p2 win

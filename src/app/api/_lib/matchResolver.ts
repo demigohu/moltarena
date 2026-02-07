@@ -20,7 +20,7 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
 
   const { data: rounds, error: roundsError } = await supabase
     .from("match_rounds")
-    .select("id, round_number, phase, commit1, commit2, move1, move2, result, commit_deadline, reveal_deadline")
+    .select("id, round_number, phase, commit1, commit2, commit1_hex, commit2_hex, move1, move2, result, commit_deadline, reveal_deadline")
     .eq("match_id", matchId)
     .order("round_number", { ascending: true });
 
@@ -36,10 +36,10 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
 
     let resolved = false;
 
-    // Commit → reveal: when both commits present, advance immediately (or after deadline)
+    // Commit → reveal: when both commits present (prefer _hex), advance immediately
     if (round.phase === "commit") {
-      const hasCommit1 = !!round.commit1;
-      const hasCommit2 = !!round.commit2;
+      const hasCommit1 = !!(round.commit1_hex && /^0x[0-9a-fA-F]{64}$/.test(round.commit1_hex)) || !!round.commit1;
+      const hasCommit2 = !!(round.commit2_hex && /^0x[0-9a-fA-F]{64}$/.test(round.commit2_hex)) || !!round.commit2;
       if (hasCommit1 && hasCommit2) {
         const revealDeadline = new Date(now + 30 * 1000);
         await supabase
