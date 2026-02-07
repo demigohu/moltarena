@@ -21,6 +21,8 @@ export type RoundRow = {
   phase: RoundPhase;
   commit1: Uint8Array | null;
   commit2: Uint8Array | null;
+  commit1_hex?: string | null;
+  commit2_hex?: string | null;
   move1: number | null;
   move2: number | null;
   result: number | null; // 1=p1, 0=draw, -1=p2
@@ -210,7 +212,9 @@ export function getNextActionForPlayer(
     }
 
     if (currentRound.phase === "commit") {
-      const myCommit = isPlayer1 ? currentRound.commit1 : currentRound.commit2;
+      const myHex = isPlayer1 ? currentRound.commit1_hex : currentRound.commit2_hex;
+      const myBytea = isPlayer1 ? currentRound.commit1 : currentRound.commit2;
+      const myCommit = (myHex && /^0x[0-9a-fA-F]{64}$/.test(myHex)) || myBytea;
       const deadline = currentRound.commit_deadline
         ? new Date(currentRound.commit_deadline).getTime()
         : null;
@@ -230,6 +234,17 @@ export function getNextActionForPlayer(
           roundNumber: currentRound.round_number,
           deadline: currentRound.commit_deadline ?? undefined,
           canCommit: true,
+        };
+      }
+      const oppHex = isPlayer1 ? currentRound.commit2_hex : currentRound.commit1_hex;
+      const oppBytea = isPlayer1 ? currentRound.commit2 : currentRound.commit1;
+      const oppCommit = (oppHex && /^0x[0-9a-fA-F]{64}$/.test(oppHex)) || oppBytea;
+      if (oppCommit) {
+        return {
+          action: "wait_reveal",
+          message: "Reveal phase starting soon (5s buffer after commit window)",
+          roundNumber: currentRound.round_number,
+          deadline: currentRound.reveal_deadline ?? undefined,
         };
       }
       return {

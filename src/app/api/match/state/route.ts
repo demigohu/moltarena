@@ -256,6 +256,8 @@ export async function GET(req: NextRequest) {
     phase: r.phase as RoundRow["phase"],
     commit1: r.commit1 as Uint8Array | null,
     commit2: r.commit2 as Uint8Array | null,
+    commit1_hex: r.commit1_hex,
+    commit2_hex: r.commit2_hex,
     move1: r.move1,
     move2: r.move2,
     result: r.result,

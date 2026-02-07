@@ -1,5 +1,9 @@
 import { supabase } from "./supabase";
 
+const COMMIT_WINDOW_MS = 30_000;
+const REVEAL_WINDOW_MS = 30_000;
+const PHASE_BUFFER_MS = 5_000;
+
 /**
  * Auto-resolve timeout rounds using forfeit concept (no auto-win).
  * Called every time /api/match/state is polled (heartbeat-driven resolution).
@@ -20,7 +24,7 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
 
   const { data: rounds, error: roundsError } = await supabase
     .from("match_rounds")
-    .select("id, round_number, phase, commit1, commit2, commit1_hex, commit2_hex, move1, move2, result, commit_deadline, reveal_deadline")
+    .select("id, round_number, phase, commit1, commit2, commit1_hex, commit2_hex, move1, move2, result, commit_deadline, reveal_deadline, updated_at")
     .eq("match_id", matchId)
     .order("round_number", { ascending: true });
 
@@ -36,21 +40,27 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
 
     let resolved = false;
 
-    // Commit → reveal: when both commits present (prefer _hex), advance immediately
+    // Commit → reveal: when both commits present, advance only after commit window + 5s buffer
     if (round.phase === "commit") {
       const hasCommit1 = !!(round.commit1_hex && /^0x[0-9a-fA-F]{64}$/.test(round.commit1_hex)) || !!round.commit1;
       const hasCommit2 = !!(round.commit2_hex && /^0x[0-9a-fA-F]{64}$/.test(round.commit2_hex)) || !!round.commit2;
       if (hasCommit1 && hasCommit2) {
-        const revealDeadline = new Date(now + 30 * 1000);
-        await supabase
-          .from("match_rounds")
-          .update({
-            phase: "reveal",
-            reveal_deadline: round.reveal_deadline ?? revealDeadline.toISOString(),
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", round.id);
-        resolved = true;
+        const commitDeadlineTs = round.commit_deadline
+          ? new Date(round.commit_deadline).getTime()
+          : now;
+        const revealStart = Math.max(now, commitDeadlineTs) + PHASE_BUFFER_MS;
+        const revealDeadline = new Date(revealStart + REVEAL_WINDOW_MS);
+        if (now >= revealStart) {
+          await supabase
+            .from("match_rounds")
+            .update({
+              phase: "reveal",
+              reveal_deadline: round.reveal_deadline ?? revealDeadline.toISOString(),
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", round.id);
+          resolved = true;
+        }
       }
     }
 
@@ -168,6 +178,45 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
     }
   }
 
+  // After a round is done: if no winner yet and round_number < best_of, create next round after 5s buffer
+  const doneRounds = (rounds ?? []).filter((r) => r.phase === "done" || r.result !== null);
+  const lastDone = doneRounds.length > 0
+    ? doneRounds.reduce((a, b) => (a.round_number > b.round_number ? a : b))
+    : null;
+
+  if (lastDone) {
+    const { data: m } = await supabase
+      .from("matches")
+      .select("wins1, wins2, best_of")
+      .eq("id", matchId)
+      .single();
+    if (m) {
+      const neededWins = Math.ceil(m.best_of / 2);
+      const hasWinner = (m.wins1 ?? 0) >= neededWins || (m.wins2 ?? 0) >= neededWins;
+      const roundDoneAt = lastDone.updated_at ? new Date(lastDone.updated_at).getTime() : now;
+      const bufferPassed = now >= roundDoneAt + PHASE_BUFFER_MS;
+
+      if (!hasWinner && lastDone.round_number < m.best_of && bufferPassed) {
+        const nextRoundNum = lastDone.round_number + 1;
+        const { data: existing } = await supabase
+          .from("match_rounds")
+          .select("id")
+          .eq("match_id", matchId)
+          .eq("round_number", nextRoundNum)
+          .single();
+        if (!existing) {
+          const commitDeadline = new Date(now + COMMIT_WINDOW_MS);
+          await supabase.from("match_rounds").insert({
+            match_id: matchId,
+            round_number: nextRoundNum,
+            phase: "commit",
+            commit_deadline: commitDeadline.toISOString(),
+          });
+        }
+      }
+    }
+  }
+
   // Check if match is finished (best-of-5: first to 3 wins)
   const { data: updatedMatch } = await supabase
     .from("matches")
@@ -202,7 +251,7 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
  * Create round 1 for a match after both players have staked.
  */
 export async function createRound1(matchId: string): Promise<void> {
-  const commitDeadline = new Date(Date.now() + 30 * 1000); // 30s from now
+  const commitDeadline = new Date(Date.now() + COMMIT_WINDOW_MS);
 
   await supabase.from("match_rounds").insert({
     match_id: matchId,

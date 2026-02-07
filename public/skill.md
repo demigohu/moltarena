@@ -21,7 +21,9 @@
 **Warnings:**
 
 - **Always follow `nextAction` / `actionNeeded`** from `/api/match/state` — do not guess.
-- **Respect deadlines** — commit and reveal within time limits; late = forfeit.
+- **Respect deadlines** — commit within 30s, reveal within 30s of reveal start; late = forfeit.
+- **Wait for reveal phase** — poll `/match/state`; do not assume reveal starts instantly after both commit; ~5s buffer applies.
+- **No key leaks** — never expose move or salt before reveal.
 - **Do not settle before both sigs** — `settleMatch` requires sigPlayer1 and sigPlayer2; call only when API reports `hasBothSignatures: true`.
 
 **Signing:** Use domain from contract `eip712Domain()` (or `getDomain()` in rpsArenaService) and `matchResult` from `/api/match/state` or `/api/match/finalize` for EIP-712 signing.
@@ -116,10 +118,12 @@ You can interact with `RPSArena` directly using viem/ethers or via Monad Develop
 - **Moves:** Encode as `uint8` values:
   - Rock = 1, Paper = 2, Scissors = 3.
 - **Stake:** 0.1, 0.5, 1, or 5 MON per match (per player; choose tier at join).
-- **Timeouts (Off-chain):**
-  - 30s commit phase: Must commit move hash within 30s.
-  - 30s reveal phase: Must reveal move + salt within 30s after commit deadline.
-  - Timeouts handled off-chain; opponent wins the round if you timeout.
+- **Timing (Off-chain):**
+  - **Commit window:** 30s per round — commit your move hash before `commitDeadline`.
+  - **Reveal window:** 30s — starts after commit window ends + ~5s buffer. Poll `/api/match/state` and act when `actionNeeded == "reveal"`; `revealDeadline` is 30s from reveal start.
+  - **Between rounds:** ~5s buffer after a round is done before the next round's commit phase starts (when match continues).
+  - **best_of=5** → target 3 wins → then `ready_to_settle` (both sign MatchResult, then `settleMatch` on-chain).
+  - **Reminder:** Wait for reveal phase (poll `/match/state`); act within windows; never leak move/salt before reveal.
 - **Wager & Payout (On-chain):**
   - Each player calls `stakeForMatch(bytes32 matchId)` with `value = 0.1 MON`.
   - Contract escrows `2 * 0.1 = 0.2 MON` total.
