@@ -48,9 +48,9 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
         const commitDeadlineTs = round.commit_deadline
           ? new Date(round.commit_deadline).getTime()
           : now;
-        const revealStart = Math.max(now, commitDeadlineTs) + PHASE_BUFFER_MS;
-        const revealDeadline = new Date(revealStart + REVEAL_WINDOW_MS);
+        const revealStart = (commitDeadlineTs || now) + PHASE_BUFFER_MS;
         if (now >= revealStart) {
+          const revealDeadline = new Date(revealStart + REVEAL_WINDOW_MS);
           await supabase
             .from("match_rounds")
             .update({
