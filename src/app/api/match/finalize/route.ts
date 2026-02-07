@@ -5,6 +5,7 @@ import { RPS_ARENA_ADDRESS } from "@/app/api/_lib/monadClient";
 import { isAddress } from "viem";
 import { buildMatchResult, type MatchRow, type RoundRow } from "@/app/api/_lib/nextActionHelper";
 import { verifyMatchResultSignature } from "@/app/api/_lib/eip712MatchResult";
+import { publishMatchEvent } from "@/app/api/_lib/realtimePublish";
 
 type FinalizeBody = {
   matchId: string;
@@ -282,6 +283,10 @@ export async function POST(req: NextRequest) {
       sig1: sig1Now,
       sig2: sig2Now,
     };
+    publishMatchEvent(matchId, "signatures_ready", {
+      signatures: { sig1: sig1Now as string, sig2: sig2Now as string },
+      settleArgs: { matchResult, sig1: sig1Now, sig2: sig2Now },
+    }).catch(() => {});
   }
 
   return NextResponse.json(response);

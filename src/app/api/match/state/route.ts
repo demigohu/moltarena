@@ -5,6 +5,8 @@ import { isAddress } from "viem";
 import { keccak256, toBytes } from "viem";
 import { checkOnChainStake, isStakeReady } from "@/app/api/_lib/stakeVerifier";
 import { checkAndResolveTimeouts, createRound1 } from "@/app/api/_lib/matchResolver";
+import { reconcileRounds } from "@/app/api/_lib/reconcileRounds";
+import { publishMatchEvent } from "@/app/api/_lib/realtimePublish";
 import { byteaToHex } from "@/app/api/_lib/bytea";
 import { getNextActionForPlayer, buildMatchResult, type MatchRow, type RoundRow } from "@/app/api/_lib/nextActionHelper";
 
@@ -102,9 +104,10 @@ export async function GET(req: NextRequest) {
     : match.player1_address;
   const opponentName = isPlayer1 ? match.player2_name : match.player1_name;
 
-  // HEARTBEAT-DRIVEN RESOLUTION: Auto-resolve timeouts every time agent polls
+  // HEARTBEAT-DRIVEN RESOLUTION: Auto-resolve timeouts + reconcile rounds
   if (match.status === "in_progress") {
     await checkAndResolveTimeouts(matchId);
+    await reconcileRounds(matchId);
     // Re-fetch match after resolution (wins might have changed)
     const { data: updatedMatch } = await supabase
       .from("matches")
@@ -112,10 +115,46 @@ export async function GET(req: NextRequest) {
       .eq("id", matchId)
       .single();
     if (updatedMatch) {
+      const prevStatus = match.status;
       match.wins1 = updatedMatch.wins1;
       match.wins2 = updatedMatch.wins2;
       match.status = updatedMatch.status as typeof match.status;
       match.winner_address = updatedMatch.winner_address;
+      // Realtime: ready_to_settle transition
+      if (updatedMatch.status === "ready_to_settle" && prevStatus !== "ready_to_settle") {
+        const { data: m2 } = await supabase
+          .from("matches")
+          .select("status, winner_address")
+          .eq("id", matchId)
+          .single();
+        if (m2?.winner_address) {
+          const { data: rds } = await supabase
+            .from("match_rounds")
+            .select("round_number, phase, move1, move2, result, commit_deadline, reveal_deadline")
+            .eq("match_id", matchId)
+            .order("round_number", { ascending: true });
+          const matchRowForResult = {
+            ...match,
+            status: "ready_to_settle" as const,
+            wins1: updatedMatch.wins1 ?? 0,
+            wins2: updatedMatch.wins2 ?? 0,
+            winner_address: m2.winner_address,
+          };
+          const roundRows = (rds ?? []).map((r) => ({
+            round_number: r.round_number,
+            phase: r.phase as "commit" | "reveal" | "done",
+            commit1: null as Uint8Array | null,
+            commit2: null as Uint8Array | null,
+            move1: r.move1,
+            move2: r.move2,
+            result: r.result,
+            commit_deadline: r.commit_deadline,
+            reveal_deadline: r.reveal_deadline,
+          }));
+          const mr = buildMatchResult(matchRowForResult, roundRows);
+          publishMatchEvent(matchId, "ready_to_settle", { matchResult: mr }).catch(() => {});
+        }
+      }
     }
   }
 
@@ -322,6 +361,17 @@ export async function GET(req: NextRequest) {
       sig1: match.sig1,
       sig2: match.sig2,
     };
+  }
+
+  // Realtime: publish state to channel (fire-and-forget)
+  if (match.status === "in_progress" || match.status === "ready_to_settle") {
+    publishMatchEvent(matchId, "state", {
+      status: match.status,
+      wins1: match.wins1 ?? 0,
+      wins2: match.wins2 ?? 0,
+      actionNeeded: nextAction.action === "done" ? undefined : nextAction.action,
+      ...(matchResult && { matchResult }),
+    }).catch(() => {});
   }
 
   return NextResponse.json(responsePayload);
