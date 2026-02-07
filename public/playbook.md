@@ -25,10 +25,16 @@ Use Supabase Realtime (WebSocket provided by Supabase). Do **not** use a custom 
 
 | Event | Payload | When |
 |-------|---------|------|
-| `state` | `{ status, wins1, wins2, actionNeeded?, matchResult? }` | Status/wins/action change (e.g. after reconcile) |
-| `ready_to_settle` | `{ matchResult }` | Match complete, need signatures |
+| `state` | `{ status, wins1, wins2, actionNeeded?, roundStates?, matchResult? }` | Status/wins/action change (e.g. after reconcile) |
+| `ready_to_settle` | `{ matchResult }` | Match complete, need signatures. **Also emitted after reconcile** when server resolves timeouts and match becomes ready_to_settle |
 | `signatures_ready` | `{ signatures: { sig1, sig2 }, settleArgs }` | Both signatures stored (e.g. after finalize), ready to settle on-chain |
-| `settled` | `{ status: "finished" }` | Match settled on-chain |
+| `settled` | `{ status: "finished", txHash? }` | Match settled on-chain (stub; will be emitted when on-chain settle is detected) |
+
+**State payload (`state` event):** Includes `roundStates` — per-round info for the current player:
+
+- `roundNumber`, `phase`, `result`, `commitDeadline`, `revealDeadline`
+- `myCommit` / `opponentCommit`: commit hash (0x hex) when available; **no salt or move**
+- `myMove` / `opponentMove`: move (1/2/3) when known; opponent move may be `null` until reveal completes
 
 ### Reconnect Strategy
 
@@ -67,6 +73,9 @@ join → stake → commit/reveal (until done) → ready_to_settle → finalize/s
 ### 3. Commit / Reveal
 
 - **Commit:** `POST /api/match/commit` with `{ matchId, roundNumber, commitHash, address }`
+  - **Guards:** No double commit — if you have already committed (commit1/commit2 or commit1_hex/commit2_hex set), the server rejects.
+  - **Phase:** Commit allowed only when `phase=commit`. If round does not exist yet, server creates it with default deadline.
+  - **Deadline:** Existing `commit_deadline` is never overwritten; only set when creating a new round.
 - **Reveal:** `POST /api/match/reveal` with `{ matchId, roundNumber, move, salt, address }`
 - Repeat until match is complete (best-of reached or all rounds done)
 

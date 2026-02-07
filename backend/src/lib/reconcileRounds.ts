@@ -26,7 +26,9 @@ function hasCommit(
   return !!bytea;
 }
 
-export async function reconcileRounds(matchId: string): Promise<void> {
+export type ReconcileResult = { becameReadyToSettle: boolean };
+
+export async function reconcileRounds(matchId: string): Promise<ReconcileResult> {
   const now = Date.now();
 
   const { data: match, error: matchError } = await supabase
@@ -35,7 +37,8 @@ export async function reconcileRounds(matchId: string): Promise<void> {
     .eq("id", matchId)
     .single();
 
-  if (matchError || !match || match.status !== "in_progress") return;
+  if (matchError || !match || match.status !== "in_progress")
+    return { becameReadyToSettle: false };
 
   const { data: rounds, error: roundsError } = await supabase
     .from("match_rounds")
@@ -45,7 +48,7 @@ export async function reconcileRounds(matchId: string): Promise<void> {
     .eq("match_id", matchId)
     .order("round_number", { ascending: true });
 
-  if (roundsError || !rounds) return;
+  if (roundsError || !rounds) return { becameReadyToSettle: false };
 
   const bestOf = match.best_of ?? 5;
   const roundNumbers = new Set(rounds.map((r) => r.round_number));
@@ -207,6 +210,7 @@ export async function reconcileRounds(matchId: string): Promise<void> {
   ).length;
   const allDone = doneCount >= bestOf;
 
+  let becameReadyToSettle = false;
   if (matchWins1 >= neededWins || matchWins2 >= neededWins || allDone) {
     const winnerAddress =
       matchWins1 >= neededWins
@@ -225,6 +229,7 @@ export async function reconcileRounds(matchId: string): Promise<void> {
           updated_at: new Date().toISOString(),
         })
         .eq("id", matchId);
+      becameReadyToSettle = true;
     }
   }
 
@@ -239,4 +244,6 @@ export async function reconcileRounds(matchId: string): Promise<void> {
       hasWinner: matchWins1 >= neededWins || matchWins2 >= neededWins,
     },
   });
+
+  return { becameReadyToSettle };
 }

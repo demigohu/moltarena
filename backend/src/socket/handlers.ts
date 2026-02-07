@@ -10,6 +10,15 @@ import { buildMatchResult, getNextActionForPlayer, isValidMove } from "../lib/ne
 import { verifyMatchResultSignature } from "../lib/eip712.js";
 import { byteaToHex, byteaToBuffer } from "../lib/bytea.js";
 import { RPS_ARENA_ADDRESS } from "../lib/constants.js";
+function resolveCommitHex(
+  hexVal: unknown,
+  byteaVal: unknown
+): string | null {
+  if (hexVal && typeof hexVal === "string" && /^0x[0-9a-fA-F]{64}$/.test(hexVal))
+    return hexVal;
+  const decoded = byteaToHex(byteaVal);
+  return decoded && decoded.length === 66 ? decoded : null;
+}
 
 type AuthPayload = { apiKey?: string; address?: string };
 
@@ -60,7 +69,7 @@ async function buildStatePayload(
   const { data: rounds } = await supabase
     .from("match_rounds")
     .select(
-      "round_number, phase, commit1_hex, commit2_hex, move1, move2, result, commit_deadline, reveal_deadline"
+      "round_number, phase, commit1, commit2, commit1_hex, commit2_hex, move1, move2, result, commit_deadline, reveal_deadline"
     )
     .eq("match_id", matchId)
     .order("round_number", { ascending: true });
@@ -93,13 +102,20 @@ async function buildStatePayload(
   }));
   const nextAction = getNextActionForPlayer(matchRow, roundRows, addr);
 
+  const isPlayer1 = match.player1_address?.toLowerCase() === addr;
   const roundStates = (rounds ?? []).map((r) => ({
     roundNumber: r.round_number,
     phase: r.phase,
-    myCommit: null,
-    opponentCommit: null,
-    myMove: null,
-    opponentMove: null,
+    myCommit: resolveCommitHex(
+      isPlayer1 ? r.commit1_hex : r.commit2_hex,
+      isPlayer1 ? r.commit1 : r.commit2
+    ),
+    opponentCommit: resolveCommitHex(
+      isPlayer1 ? r.commit2_hex : r.commit1_hex,
+      isPlayer1 ? r.commit2 : r.commit1
+    ),
+    myMove: isPlayer1 ? r.move1 : r.move2,
+    opponentMove: isPlayer1 ? r.move2 : r.move1,
     result: r.result ?? null,
     commitDeadline: r.commit_deadline,
     revealDeadline: r.reveal_deadline,
@@ -129,6 +145,51 @@ async function buildStatePayload(
       matchResult && { matchResult, sig1: match.sig1, sig2: match.sig2 };
   }
   return payload;
+}
+
+async function buildReadyToSettlePayload(matchId: string): Promise<Record<string, unknown> | null> {
+  const { data: match, error: matchErr } = await supabase
+    .from("matches")
+    .select("id, status, stake, best_of, player1_address, player2_address, wins1, wins2, winner_address")
+    .eq("id", matchId)
+    .single();
+  if (matchErr || !match || match.status !== "ready_to_settle" || !match.winner_address)
+    return null;
+
+  const { data: rounds } = await supabase
+    .from("match_rounds")
+    .select("round_number, phase, move1, move2, result")
+    .eq("match_id", matchId)
+    .order("round_number", { ascending: true });
+
+  const matchRow = {
+    ...match,
+    stake: match.stake ?? "0.1",
+    best_of: match.best_of ?? 5,
+    wins1: match.wins1 ?? 0,
+    wins2: match.wins2 ?? 0,
+  };
+  const roundRows = (rounds ?? []).map((r) => ({
+    round_number: r.round_number,
+    phase: r.phase as "commit" | "reveal" | "done",
+    commit1: null,
+    commit2: null,
+    move1: r.move1,
+    move2: r.move2,
+    result: r.result,
+    commit_deadline: null,
+    reveal_deadline: null,
+  }));
+  const matchResult = buildMatchResult(matchRow, roundRows);
+  return { matchResult };
+}
+
+/** Emit settled event. Call when on-chain settle is detected. */
+export function emitSettled(io: Server, matchId: string, txHash?: string): void {
+  io.to(getRoom(matchId)).emit("settled", {
+    status: "finished",
+    ...(txHash && { txHash }),
+  });
 }
 
 export function setupSocketHandlers(io: Server) {
@@ -215,18 +276,29 @@ export function setupSocketHandlers(io: Server) {
 
         const { data: round } = await supabase
           .from("match_rounds")
-          .select("id, phase")
+          .select("id, phase, commit1, commit2, commit1_hex, commit2_hex, commit_deadline")
           .eq("match_id", matchId)
           .eq("round_number", roundNumber)
           .single();
 
-        if (round && round.phase !== "commit") {
-          emitError(socket, "INVALID_PHASE", "Round not in commit phase");
-          return;
+        if (round) {
+          if (round.phase !== "commit") {
+            emitError(socket, "INVALID_PHASE", "Round not in commit phase; only commit when phase=commit");
+            return;
+          }
+          const alreadyCommitted =
+            (round[commitHexField] && /^0x[0-9a-fA-F]{64}$/.test(round[commitHexField] as string)) ||
+            round[commitField];
+          if (alreadyCommitted) {
+            emitError(socket, "ALREADY_COMMITTED", "You have already committed for this round");
+            return;
+          }
         }
 
-        const commitDeadline = new Date(Date.now() + 30_000);
         const byteaHex = "\\x" + commitHash.slice(2);
+        const useDeadline = round?.commit_deadline
+          ? round.commit_deadline
+          : new Date(Date.now() + 30_000).toISOString();
 
         if (round) {
           await supabase
@@ -234,7 +306,6 @@ export function setupSocketHandlers(io: Server) {
             .update({
               [commitHexField]: commitHash,
               [commitField]: byteaHex,
-              commit_deadline: commitDeadline.toISOString(),
               updated_at: new Date().toISOString(),
             })
             .eq("id", round.id);
@@ -245,7 +316,7 @@ export function setupSocketHandlers(io: Server) {
             [commitHexField]: commitHash,
             [commitField]: byteaHex,
             phase: "commit",
-            commit_deadline: commitDeadline.toISOString(),
+            commit_deadline: useDeadline,
           });
         }
 
@@ -257,7 +328,12 @@ export function setupSocketHandlers(io: Server) {
           payload: { roundNumber, commitHash: "0x..." },
         });
 
-        await reconcileRounds(matchId);
+        const { becameReadyToSettle } = await reconcileRounds(matchId);
+        if (becameReadyToSettle) {
+          const rts = await buildReadyToSettlePayload(matchId);
+          if (rts?.matchResult)
+            io.to(getRoom(matchId)).emit("ready_to_settle", { matchResult: rts.matchResult });
+        }
         const payload = await buildStatePayload(matchId, addr);
         if (payload) {
           io.to(getRoom(matchId)).emit("state", payload);
@@ -433,7 +509,12 @@ export function setupSocketHandlers(io: Server) {
           }
         }
 
-        await reconcileRounds(matchId);
+        const { becameReadyToSettle } = await reconcileRounds(matchId);
+        if (becameReadyToSettle) {
+          const rts = await buildReadyToSettlePayload(matchId);
+          if (rts?.matchResult)
+            io.to(getRoom(matchId)).emit("ready_to_settle", { matchResult: rts.matchResult });
+        }
         const payload = await buildStatePayload(matchId, addr);
         if (payload) io.to(getRoom(matchId)).emit("state", payload);
       }
@@ -569,6 +650,12 @@ export function setupSocketHandlers(io: Server) {
         return;
       }
       socket.join(getRoom(matchId));
+      const { becameReadyToSettle } = await reconcileRounds(matchId);
+      if (becameReadyToSettle) {
+        const rts = await buildReadyToSettlePayload(matchId);
+        if (rts?.matchResult)
+          io.to(getRoom(matchId)).emit("ready_to_settle", { matchResult: rts.matchResult });
+      }
       const payload = await buildStatePayload(matchId, addr);
       if (payload) socket.emit("state", payload);
     });
