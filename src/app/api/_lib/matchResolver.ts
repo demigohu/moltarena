@@ -1,6 +1,15 @@
 import { supabase } from "./supabase";
 
 const COMMIT_WINDOW_MS = 30_000;
+
+/** Normalize string timestamp (space→T), parse; return null if NaN. */
+function parseTs(val: unknown): number | null {
+  if (val == null) return null;
+  const s = typeof val === "string" ? val.replace(" ", "T") : String(val);
+  const ts = Date.parse(s);
+  return Number.isNaN(ts) ? null : ts;
+}
+
 const REVEAL_WINDOW_MS = 30_000;
 const PHASE_BUFFER_MS = 5_000;
 
@@ -45,10 +54,8 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
       const hasCommit1 = !!(round.commit1_hex && /^0x[0-9a-fA-F]{64}$/.test(round.commit1_hex)) || !!round.commit1;
       const hasCommit2 = !!(round.commit2_hex && /^0x[0-9a-fA-F]{64}$/.test(round.commit2_hex)) || !!round.commit2;
       if (hasCommit1 && hasCommit2) {
-        const commitDeadlineTs = round.commit_deadline
-          ? new Date(round.commit_deadline).getTime()
-          : now;
-        const revealStart = (commitDeadlineTs || now) + PHASE_BUFFER_MS;
+        const commitDeadlineTs = parseTs(round.commit_deadline) ?? now;
+        const revealStart = commitDeadlineTs + PHASE_BUFFER_MS;
         if (now >= revealStart) {
           const revealDeadline = new Date(revealStart + REVEAL_WINDOW_MS);
           await supabase
@@ -65,9 +72,9 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
     }
 
     // Commit timeout: only when deadline passed and commits missing
-    if (!resolved && round.phase === "commit" && round.commit_deadline) {
-      const commitDeadline = new Date(round.commit_deadline).getTime();
-      if (now > commitDeadline) {
+    const commitDeadlineTs = parseTs(round.commit_deadline);
+    if (!resolved && round.phase === "commit" && commitDeadlineTs != null) {
+      if (now > commitDeadlineTs) {
         const hasCommit1 = !!round.commit1;
         const hasCommit2 = !!round.commit2;
 
@@ -123,9 +130,9 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
     }
 
     // Check reveal timeout
-    if (!resolved && round.phase === "reveal" && round.reveal_deadline) {
-      const revealDeadline = new Date(round.reveal_deadline).getTime();
-      if (now > revealDeadline) {
+    const revealDeadlineTs = parseTs(round.reveal_deadline);
+    if (!resolved && round.phase === "reveal" && revealDeadlineTs != null) {
+      if (now > revealDeadlineTs) {
         const hasMove1 = round.move1 !== null && round.move1 !== undefined;
         const hasMove2 = round.move2 !== null && round.move2 !== undefined;
 
@@ -193,7 +200,7 @@ export async function checkAndResolveTimeouts(matchId: string): Promise<void> {
     if (m) {
       const neededWins = Math.ceil(m.best_of / 2);
       const hasWinner = (m.wins1 ?? 0) >= neededWins || (m.wins2 ?? 0) >= neededWins;
-      const roundDoneAt = lastDone.updated_at ? new Date(lastDone.updated_at).getTime() : now;
+      const roundDoneAt = parseTs(lastDone.updated_at) ?? now;
       const bufferPassed = now >= roundDoneAt + PHASE_BUFFER_MS;
 
       if (!hasWinner && lastDone.round_number < m.best_of && bufferPassed) {
