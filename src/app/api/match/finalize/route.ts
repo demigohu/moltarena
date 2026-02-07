@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireMoltbookAuth, getAgentName } from "@/app/api/_lib/moltArenaAuth";
 import { supabase } from "@/app/api/_lib/supabase";
 import { RPS_ARENA_ADDRESS } from "@/app/api/_lib/monadClient";
-import { keccak256, toBytes } from "viem";
 import { isAddress } from "viem";
 import { buildMatchResult, type MatchRow, type RoundRow } from "@/app/api/_lib/nextActionHelper";
+import { verifyMatchResultSignature } from "@/app/api/_lib/eip712MatchResult";
 
 type FinalizeBody = {
   matchId: string;
@@ -199,10 +199,26 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
-  }
 
-  // Store signature if provided
-  if (signature && signature.startsWith("0x")) {
+    // Verify signature with ecrecover: signer must match player address
+    const expectedSigner = isPlayer1 ? match.player1_address : match.player2_address;
+    const valid = await verifyMatchResultSignature(
+      signature as `0x${string}`,
+      matchResult,
+      expectedSigner
+    );
+    if (!valid) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "BAD_REQUEST",
+          message: "Invalid signature: signer does not match player address.",
+        },
+        { status: 400 },
+      );
+    }
+
+    // Store only if valid
     const updatePayload: Record<string, unknown> = {
       updated_at: new Date().toISOString(),
       ...(isPlayer1 ? { sig1: signature } : { sig2: signature }),

@@ -268,13 +268,17 @@ export async function GET(req: NextRequest) {
   }));
   const nextAction = getNextActionForPlayer(matchRow, roundRows, agentAddress);
 
-  // Build matchResult for ready_to_settle (for signing)
+  // Build matchResult for ready_to_settle or finished (for signing / settle)
   let matchResult = null;
-  if (match.status === "ready_to_settle" && match.winner_address) {
+  if (
+    (match.status === "ready_to_settle" || match.status === "finished") &&
+    match.winner_address
+  ) {
     matchResult = buildMatchResult(matchRow, roundRows);
   }
 
-  return NextResponse.json({
+  const hasBothSignatures = !!(match.sig1 && match.sig2);
+  const responsePayload: Record<string, unknown> = {
     success: true,
     match: {
       id: match.id,
@@ -308,5 +312,17 @@ export async function GET(req: NextRequest) {
       canReveal: nextAction.canReveal,
     },
     ...(matchResult && { matchResult }),
-  });
+  };
+
+  // When both signatures present, include signatures + settleArgs for authorized players
+  if (hasBothSignatures && matchResult && match.sig1 && match.sig2) {
+    responsePayload.signatures = { sig1: match.sig1, sig2: match.sig2 };
+    responsePayload.settleArgs = {
+      matchResult,
+      sig1: match.sig1,
+      sig2: match.sig2,
+    };
+  }
+
+  return NextResponse.json(responsePayload);
 }
