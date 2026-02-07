@@ -187,6 +187,20 @@ export async function POST(req: NextRequest) {
 
   const isPlayer1 = match.player1_address.toLowerCase() === agentAddress;
 
+  // Validate signature format: 0x + 130 hex chars (65 bytes)
+  if (signature) {
+    if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "BAD_REQUEST",
+          message: "Invalid signature. Must be hex string 0x followed by 130 hex chars (65 bytes).",
+        },
+        { status: 400 },
+      );
+    }
+  }
+
   // Store signature if provided
   if (signature && signature.startsWith("0x")) {
     const updatePayload: Record<string, unknown> = {
@@ -219,7 +233,13 @@ export async function POST(req: NextRequest) {
 
   const chainId = 10143; // Monad testnet
 
-  return NextResponse.json({
+  // signatures included only when both present (prevent partial sig leak)
+  // Unit: return.signatures present iff hasBothSigs
+  const signatures = hasBothSigs
+    ? { sig1: sig1Now ?? null, sig2: sig2Now ?? null }
+    : undefined;
+
+  const response: Record<string, unknown> = {
     success: true,
     message: hasBothSigs
       ? "Both signatures ready. Call settleMatch on-chain."
@@ -238,5 +258,15 @@ export async function POST(req: NextRequest) {
       notes: "Use EIP-712 typed data signing for MatchResult struct. Both signatures required.",
       hasBothSignatures: hasBothSigs,
     },
-  });
+  };
+  if (hasBothSigs && signatures) {
+    response.signatures = signatures;
+    response.settleArgs = {
+      matchResult,
+      sig1: sig1Now,
+      sig2: sig2Now,
+    };
+  }
+
+  return NextResponse.json(response);
 }
