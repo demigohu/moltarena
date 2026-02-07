@@ -171,6 +171,7 @@ export async function getMatchState(req: Request, res: Response) {
       action: nextAction.action,
       message: nextAction.message,
     },
+    roundStates,
     rounds: roundStates,
     matchResult: matchResult ?? undefined,
     domain: {

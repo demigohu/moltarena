@@ -308,14 +308,21 @@ export function setupSocketHandlers(io: Server) {
           : new Date(Date.now() + 30_000).toISOString();
 
         if (round) {
-          await supabase
+          const { data: updated } = await supabase
             .from("match_rounds")
             .update({
               [commitHexField]: commitHash,
               [commitField]: byteaHex,
               updated_at: new Date().toISOString(),
             })
-            .eq("id", round.id);
+            .eq("id", round.id)
+            .is(commitHexField, null)
+            .select("id");
+          // TODO: Consider DB transaction for full atomicity if race conditions persist
+          if (!updated?.length) {
+            emitError(socket, "ALREADY_COMMITTED", "You have already committed for this round (or concurrent update)");
+            return;
+          }
         } else {
           await supabase.from("match_rounds").insert({
             match_id: matchId,
@@ -386,7 +393,7 @@ export function setupSocketHandlers(io: Server) {
 
         const { data: round, error: roundErr } = await supabase
           .from("match_rounds")
-          .select("id, phase, commit1, commit2, commit1_hex, commit2_hex, move1, move2")
+          .select("id, phase, commit1, commit2, commit1_hex, commit2_hex, move1, move2, commit_deadline, reveal_deadline")
           .eq("match_id", matchId)
           .eq("round_number", roundNumber)
           .single();
@@ -395,8 +402,24 @@ export function setupSocketHandlers(io: Server) {
           emitError(socket, "NOT_FOUND", "Round not found");
           return;
         }
-        if (round.phase !== "commit" && round.phase !== "reveal") {
-          emitError(socket, "INVALID_PHASE", "Round not in commit/reveal");
+        if (round.phase === "done") {
+          emitError(socket, "INVALID_PHASE", "Round already done");
+          return;
+        }
+        const hasC1 = !!(round.commit1_hex && /^0x[0-9a-fA-F]{64}$/.test(round.commit1_hex as string)) || round.commit1;
+        const hasC2 = !!(round.commit2_hex && /^0x[0-9a-fA-F]{64}$/.test(round.commit2_hex as string)) || round.commit2;
+        const bothCommitted = hasC1 && hasC2;
+        const commitDeadlineTs = round.commit_deadline ? Date.parse(String(round.commit_deadline).replace(" ", "T")) : NaN;
+        const revealStartTs = !isNaN(commitDeadlineTs) ? commitDeadlineTs + 5_000 : 0;
+        const allowRevealFromCommit = round.phase === "commit" && bothCommitted && Date.now() >= revealStartTs;
+        const inRevealPhase = round.phase === "reveal";
+        if (!inRevealPhase && !allowRevealFromCommit) {
+          emitError(socket, "INVALID_PHASE", "Reveal allowed only when phase=reveal or (phase=commit with both commits and past reveal-start buffer)");
+          return;
+        }
+        const revealDeadlineTs = round.reveal_deadline ? Date.parse(String(round.reveal_deadline).replace(" ", "T")) : NaN;
+        if (!isNaN(revealDeadlineTs) && Date.now() > revealDeadlineTs) {
+          emitError(socket, "REVEAL_EXPIRED", "Reveal deadline passed; round will be resolved by reconcile");
           return;
         }
 
@@ -436,13 +459,19 @@ export function setupSocketHandlers(io: Server) {
           return;
         }
 
-        await supabase
+        const { data: moveUpdated } = await supabase
           .from("match_rounds")
           .update({
             [moveField]: move,
             updated_at: new Date().toISOString(),
           })
-          .eq("id", round.id);
+          .eq("id", round.id)
+          .is(moveField, null)
+          .select("id");
+        if (!moveUpdated?.length) {
+          emitError(socket, "ALREADY_REVEALED", "Already revealed (or concurrent update)");
+          return;
+        }
 
         const { data: updated } = await supabase
           .from("match_rounds")
