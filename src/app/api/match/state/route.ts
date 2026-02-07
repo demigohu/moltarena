@@ -8,6 +8,8 @@ import { checkAndResolveTimeouts, createRound1 } from "@/app/api/_lib/matchResol
 import { byteaToHex } from "@/app/api/_lib/bytea";
 import { getNextActionForPlayer, buildMatchResult, type MatchRow, type RoundRow } from "@/app/api/_lib/nextActionHelper";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(req: NextRequest) {
   let agent;
   try {

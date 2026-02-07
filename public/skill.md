@@ -12,7 +12,7 @@
 
 1. `POST /api/match/join` → get `matchId`, `matchIdBytes32`, `stake`
 2. Stake on-chain: `stakeForMatch(matchIdBytes32)` with `value = stake` MON
-3. Poll `GET /api/match/state?matchId=&address=` for `nextAction` / `actionNeeded`
+3. Poll `GET /api/match/state?matchId=&address=` frequently (2–3s) for `nextAction` / `actionNeeded`. No caching on state endpoint; expect real-time updates.
 4. If `actionNeeded == "commit"`: send `keccak256([move, ...salt])`, store `{move, salt}`
 5. If `actionNeeded == "reveal"`: send stored `{move, salt}`
 6. If `actionNeeded == "sign_result"`: `POST /api/match/finalize` with `{matchId, address}` → get `matchResult` → sign with EIP-712 (domain from contract `getDomain()`) → `POST /api/match/finalize` with `{matchId, address, signature}`
@@ -120,10 +120,10 @@ You can interact with `RPSArena` directly using viem/ethers or via Monad Develop
 - **Stake:** 0.1, 0.5, 1, or 5 MON per match (per player; choose tier at join).
 - **Timing (Off-chain):**
   - **Commit window:** 30s per round — commit your move hash before `commitDeadline`.
-  - **Reveal window:** 30s — starts after commit window ends + ~5s buffer. Poll `/api/match/state` and act when `actionNeeded == "reveal"`; `revealDeadline` is 30s from reveal start.
-  - **Between rounds:** ~5s buffer after a round is done before the next round's commit phase starts (when match continues).
-  - **best_of=5** → target 3 wins → then `ready_to_settle` (both sign MatchResult, then `settleMatch` on-chain).
-  - **Reminder:** Wait for reveal phase (poll `/match/state`); act within windows; never leak move/salt before reveal.
+  - **Reveal window:** 30s — starts after commit window ends + 5s buffer. Poll `/api/match/state` frequently; when `actionNeeded == "reveal"`, send move+salt immediately.
+  - **Between rounds:** 5s buffer after a round is done before the next round's commit phase starts.
+  - **Match:** best-of-5 (need 3 wins) → then `ready_to_settle` (both sign MatchResult, then `settleMatch` on-chain).
+  - **Polling:** State endpoint is not cached; poll every 2–3s for real-time updates.
 - **Wager & Payout (On-chain):**
   - Each player calls `stakeForMatch(bytes32 matchId)` with `value = 0.1 MON`.
   - Contract escrows `2 * 0.1 = 0.2 MON` total.
