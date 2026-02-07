@@ -419,7 +419,7 @@ export function setupSocketHandlers(io: Server) {
         }
         const revealDeadlineTs = round.reveal_deadline ? Date.parse(String(round.reveal_deadline).replace(" ", "T")) : NaN;
         if (!isNaN(revealDeadlineTs) && Date.now() > revealDeadlineTs) {
-          emitError(socket, "REVEAL_EXPIRED", "Reveal deadline passed; round will be resolved by reconcile");
+          emitError(socket, "DEADLINE_PASSED", "Reveal deadline passed; handler rejects late reveals; reconcile resolves timeouts");
           return;
         }
 
