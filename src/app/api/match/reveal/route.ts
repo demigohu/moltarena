@@ -272,15 +272,12 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Update round with reveal
+  // Update round with reveal (phase is already reveal)
   const revealDeadline = new Date(Date.now() + 30 * 1000); // 30s from now
-  const updateData: any = {
+  const updateData: Record<string, unknown> = {
     [moveField]: move,
-    phase: "reveal",
     updated_at: new Date().toISOString(),
   };
-
-  // Set reveal deadline if not set
   if (!round.reveal_deadline) {
     updateData.reveal_deadline = revealDeadline.toISOString();
   }
