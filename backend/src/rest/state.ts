@@ -91,23 +91,30 @@ export async function getMatchState(req: Request, res: Response) {
     return decoded && decoded.length === 66 ? decoded : null;
   };
 
-  const roundStates = (rounds ?? []).map((r) => ({
-    roundNumber: r.round_number,
-    phase: r.phase,
-    myCommit: resolveCommit(
-      isPlayer1 ? r.commit1_hex : r.commit2_hex,
-      isPlayer1 ? r.commit1 : r.commit2
-    ),
-    opponentCommit: resolveCommit(
-      isPlayer1 ? r.commit2_hex : r.commit1_hex,
-      isPlayer1 ? r.commit2 : r.commit1
-    ),
-    myMove: isPlayer1 ? r.move1 : r.move2,
-    opponentMove: isPlayer1 ? r.move2 : r.move1,
-    result: r.result ?? null,
-    commitDeadline: r.commit_deadline,
-    revealDeadline: r.reveal_deadline,
-  }));
+  const roundStates = (rounds ?? []).map((r) => {
+    const myMoveVal = isPlayer1 ? r.move1 : r.move2;
+    const oppMoveVal = isPlayer1 ? r.move2 : r.move1;
+    const bothRevealed = r.move1 != null && r.move2 != null;
+    const opponentMove =
+      r.phase === "done" || bothRevealed ? oppMoveVal : null;
+    return {
+      roundNumber: r.round_number,
+      phase: r.phase,
+      myCommit: resolveCommit(
+        isPlayer1 ? r.commit1_hex : r.commit2_hex,
+        isPlayer1 ? r.commit1 : r.commit2
+      ),
+      opponentCommit: resolveCommit(
+        isPlayer1 ? r.commit2_hex : r.commit1_hex,
+        isPlayer1 ? r.commit2 : r.commit1
+      ),
+      myMove: myMoveVal ?? null,
+      opponentMove: opponentMove ?? null,
+      result: r.result ?? null,
+      commitDeadline: r.commit_deadline,
+      revealDeadline: r.reveal_deadline,
+    };
+  });
 
   const matchRow: MatchRow = {
     id: match.id,
