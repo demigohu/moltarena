@@ -82,12 +82,14 @@ export async function tryMatch(
     const addr1 = a1?.wallet_address?.trim();
     const addr2 = a2?.wallet_address?.trim();
     if (addr1 && addr2 && isAddress(addr1) && isAddress(addr2)) {
-      const wagerWei = parseUnits(String(wagerAmount), 18);
-      const txHash = await createEscrowMatch(match.id, addr1 as `0x${string}`, addr2 as `0x${string}`, wagerWei);
+      // On-chain wagerAmount = tinybar (8 desimal HBAR). JSON-RPC tx `value` = tinybar * 10^10 (weibar relay).
+      const wagerTinybar = parseUnits(String(wagerAmount), 8);
+      const txHash = await createEscrowMatch(match.id, addr1 as `0x${string}`, addr2 as `0x${string}`, wagerTinybar);
       if (txHash) {
+        const depositTxValueWeibar = wagerTinybar * (10n ** 10n);
         escrow = {
           matchIdHex: matchIdToBytes32(match.id),
-          wagerWei: wagerWei.toString(),
+          wagerWei: depositTxValueWeibar.toString(),
         };
       }
     }

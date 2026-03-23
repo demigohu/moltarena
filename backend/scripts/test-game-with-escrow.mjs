@@ -53,6 +53,21 @@ const ESCROW_ABI = [
     stateMutability: "payable",
     type: "function",
   },
+  {
+    inputs: [{ internalType: "bytes32", name: "matchId", type: "bytes32" }],
+    name: "matches",
+    outputs: [
+      { internalType: "address", name: "agent1", type: "address" },
+      { internalType: "address", name: "agent2", type: "address" },
+      { internalType: "uint256", name: "wagerAmount", type: "uint256" },
+      { internalType: "bool", name: "deposit1", type: "bool" },
+      { internalType: "bool", name: "deposit2", type: "bool" },
+      { internalType: "bool", name: "resolved", type: "bool" },
+      { internalType: "bool", name: "cancelled", type: "bool" },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
 ];
 
 const chain = {
@@ -61,6 +76,9 @@ const chain = {
   nativeCurrency: { decimals: 18, name: "HBAR", symbol: "HBAR" },
   rpcUrls: { default: { http: [RPC_URL || "https://testnet.hashio.io/api"] } },
 };
+
+const HEDERA_WEIBAR_PER_TINYBAR = 10n ** 10n;
+const MAX_WAGER_TINYBAR_SANE = 6n * 10n ** 8n;
 
 function requireEnv(name, value) {
   if (!value) {
@@ -90,7 +108,7 @@ function sleep(ms) {
 }
 
 /** Kirim deposit ke escrow (payable). Returns tx hash. */
-async function sendDeposit(privateKeyHex, escrowAddress, matchIdHex, wagerWeiBigInt) {
+async function sendDeposit(privateKeyHex, escrowAddress, matchIdHex, txValueWeibar) {
   const account = privateKeyToAccount(privateKeyHex);
   const transport = http(RPC_URL);
   const client = createWalletClient({ account, chain, transport });
@@ -99,7 +117,7 @@ async function sendDeposit(privateKeyHex, escrowAddress, matchIdHex, wagerWeiBig
     abi: ESCROW_ABI,
     functionName: "deposit",
     args: [matchIdHex],
-    value: wagerWeiBigInt,
+    value: txValueWeibar,
     account,
     chain,
   });
@@ -107,6 +125,44 @@ async function sendDeposit(privateKeyHex, escrowAddress, matchIdHex, wagerWeiBig
 
 function getPublicClient() {
   return createPublicClient({ chain, transport: http(RPC_URL) });
+}
+
+async function resolveHederaDepositTxValue(publicClient, escrowAddress, matchIdHex, payloadWagerWei) {
+  const row = await publicClient.readContract({
+    address: escrowAddress,
+    abi: ESCROW_ABI,
+    functionName: "matches",
+    args: [matchIdHex],
+  });
+  const agent1 = row[0];
+  const tinybar = row[2];
+  if (agent1 === "0x0000000000000000000000000000000000000000") {
+    throw new Error(
+      "Match tidak ada di escrow ini. Samakan ESCROW_ADDRESS + HEDERA_RPC_URL di .env test dengan server API; pastikan createMatch resolver sukses."
+    );
+  }
+  if (tinybar > MAX_WAGER_TINYBAR_SANE) {
+    throw new Error(
+      "matches.wagerAmount on-chain terlalu besar untuk tinybar (8 desimal). Data lama dari parseUnits(...,18)? Restart backend terbaru dan buat match baru."
+    );
+  }
+  const txValue = tinybar * HEDERA_WEIBAR_PER_TINYBAR;
+  let fromPayload = null;
+  try {
+    if (payloadWagerWei != null && String(payloadWagerWei).length > 0) {
+      fromPayload = BigInt(String(payloadWagerWei).split(".")[0]);
+    }
+  } catch {
+    /* ignore */
+  }
+  if (fromPayload != null && fromPayload !== txValue) {
+    console.warn("wager_wei socket != tinybar*1e10 dari kontrak; memakai kontrak:", {
+      socket: fromPayload.toString(),
+      computedTxValue: txValue.toString(),
+      tinybar: tinybar.toString(),
+    });
+  }
+  return txValue;
 }
 
 async function main() {
@@ -178,17 +234,23 @@ async function main() {
   console.log("   game_matched, gameId:", gameId);
 
   if (withEscrow && gameMatchedPayload?.escrow_address && gameMatchedPayload?.deposit_match_id_hex != null) {
-    const wagerWei = BigInt(gameMatchedPayload.wager_wei || "100000000000000000"); // 0.1 HBAR (18 decimals) default
     const matchIdHex = gameMatchedPayload.deposit_match_id_hex;
+    const publicClient = getPublicClient();
+    const depositTxValue = await resolveHederaDepositTxValue(
+      publicClient,
+      ESCROW_ADDRESS,
+      matchIdHex,
+      gameMatchedPayload.wager_wei
+    );
+    console.log("   deposit tx `value` (JSON-RPC weibar) =", depositTxValue.toString());
     console.log("4. Deposit HBAR ke escrow (kedua agent)...");
     const [tx1, tx2] = await Promise.all([
-      sendDeposit(AGENT1_PK, ESCROW_ADDRESS, matchIdHex, wagerWei),
-      sendDeposit(AGENT2_PK, ESCROW_ADDRESS, matchIdHex, wagerWei),
+      sendDeposit(AGENT1_PK, ESCROW_ADDRESS, matchIdHex, depositTxValue),
+      sendDeposit(AGENT2_PK, ESCROW_ADDRESS, matchIdHex, depositTxValue),
     ]);
     console.log("   Agent1 deposit tx:", tx1);
     console.log("   Agent2 deposit tx:", tx2);
     console.log("   Menunggu konfirmasi deposit on-chain...");
-    const publicClient = getPublicClient();
     await Promise.all([
       publicClient.waitForTransactionReceipt({ hash: tx1 }),
       publicClient.waitForTransactionReceipt({ hash: tx2 }),

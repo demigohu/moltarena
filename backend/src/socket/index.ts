@@ -250,6 +250,7 @@ export function setupSocket(io: SocketIOServer): void {
       if (result.escrow && config.escrow.address) {
         payload1.escrow_address = config.escrow.address;
         payload1.deposit_match_id_hex = result.escrow.matchIdHex;
+        // Hedera JSON-RPC `value` for deposit: tinybar * 1e10 (nama field legacy "wager_wei").
         payload1.wager_wei = result.escrow.wagerWei;
         payload2.escrow_address = config.escrow.address;
         payload2.deposit_match_id_hex = result.escrow.matchIdHex;

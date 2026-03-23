@@ -127,12 +127,12 @@ export function isEscrowConfigured(): boolean {
   );
 }
 
-/** Create match on escrow (resolver only). */
+/** Create match on escrow (resolver only). `wagerTinybar` = smallest HBAR unit on-chain (8 decimals). */
 export async function createMatch(
   matchId: string,
   agent1: Address,
   agent2: Address,
-  wagerWei: bigint
+  wagerTinybar: bigint
 ): Promise<Hash | null> {
   if (!config.escrow.address || !config.escrow.resolverPrivateKey) return null;
   const { publicClient, walletClient, account } = getClients();
@@ -144,7 +144,7 @@ export async function createMatch(
     address: config.escrow.address,
     abi: ESCROW_ABI,
     functionName: "createMatch",
-    args: [matchIdBytes, agent1, agent2, wagerWei],
+    args: [matchIdBytes, agent1, agent2, wagerTinybar],
     account,
     chain,
   });

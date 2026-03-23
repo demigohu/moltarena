@@ -14,6 +14,7 @@ contract MoltArenaEscrow {
     struct Match {
         address agent1;
         address agent2;
+        /// @dev HBAR smallest unit on Hedera SSCS: tinybar (8 decimals). Same unit as `msg.value` inside this contract.
         uint256 wagerAmount;
         bool deposit1;
         bool deposit2;
@@ -84,7 +85,8 @@ contract MoltArenaEscrow {
     }
 
     /**
-     * Agent sends MON (msg.value must equal match wagerAmount). Call after createMatch.
+     * Agent deposits HBAR: `msg.value` (tinybar) must equal `wagerAmount`.
+     * From JSON-RPC, set tx `value` to wagerTinybar * 10^10 (relay weibar).
      */
     function deposit(bytes32 matchId) external payable {
         Match storage m = matches[matchId];
