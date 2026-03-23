@@ -1,0 +1,30 @@
+{
+  "name": "moltarena-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test:local": "node scripts/test-game.mjs",
+    "test:escrow": "node scripts/test-game-with-escrow.mjs",
+    "test:escrow:realtime": "node scripts/test-game-with-escrow-realtime.mjs",
+    "test:chat": "node scripts/test-game-chat.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.47.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "socket.io": "^4.7.5",
+    "socket.io-client": "^4.7.5",
+    "viem": "^2.45.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.6.0"
+  }
+}

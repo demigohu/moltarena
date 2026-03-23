@@ -1,0 +1,289 @@
+/**
+ * Test full flow dengan timing production: tunggu ~30 detik per ronde sebelum throw
+ * (sama seperti round timeout di backend, supaya rasanya seperti main beneran).
+ *
+ * Env: sama seperti test-game-with-escrow.mjs, plus:
+ *   ROUND_DELAY_SECONDS=30   (default 30, sesuaikan dengan backend ROUND_TIMEOUT_SECONDS)
+ *
+ * Jalankan: npm run test:escrow:realtime
+ * Perhatian: satu game best-of-5 bisa 3–7 ronde × 30s ≈ 1.5–3.5 menit.
+ */
+
+import "dotenv/config";
+import { io } from "socket.io-client";
+import { createPublicClient, createWalletClient, http } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+
+const BASE = process.env.BASE_URL || "http://localhost:4000";
+const RPC_URL = process.env.HEDERA_RPC_URL;
+const ESCROW_ADDRESS = process.env.ESCROW_ADDRESS;
+const AGENT1_PK = process.env.AGENT1_PRIVATE_KEY;
+const AGENT2_PK = process.env.AGENT2_PRIVATE_KEY;
+
+/** Detik menunggu setelah round_start sebelum kirim throw (production-like). */
+const ROUND_DELAY_SECONDS = parseInt(process.env.ROUND_DELAY_SECONDS || "30", 10);
+
+const ESCROW_ABI = [
+  { inputs: [], name: "AlreadyDeposited", type: "error" },
+  { inputs: [], name: "InvalidAgents", type: "error" },
+  { inputs: [], name: "InvalidWager", type: "error" },
+  { inputs: [], name: "InvalidWinner", type: "error" },
+  { inputs: [], name: "MatchEnded", type: "error" },
+  { inputs: [], name: "MatchExists", type: "error" },
+  { inputs: [], name: "MatchNotFound", type: "error" },
+  { inputs: [], name: "NotAPlayer", type: "error" },
+  { inputs: [], name: "NotBothDeposited", type: "error" },
+  { inputs: [], name: "OnlyResolver", type: "error" },
+  { inputs: [], name: "TransferFailed", type: "error" },
+  { inputs: [], name: "WrongAmount", type: "error" },
+  {
+    inputs: [{ name: "matchId", type: "bytes32" }],
+    name: "deposit",
+    outputs: [],
+    stateMutability: "payable",
+    type: "function",
+  },
+];
+
+const chain = {
+  id: 296,
+  name: "Hedera Testnet",
+  nativeCurrency: { decimals: 18, name: "HBAR", symbol: "HBAR" },
+  rpcUrls: { default: { http: [RPC_URL || "https://testnet.hashio.io/api"] } },
+};
+
+function requireEnv(name, value) {
+  if (!value) {
+    console.error(`Env ${name} wajib diisi untuk test escrow.`);
+    process.exit(1);
+  }
+  return value;
+}
+
+async function register(name, walletAddress) {
+  const res = await fetch(`${BASE}/agents/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, wallet_address: walletAddress || "0xTest" }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+function connectSocket() {
+  return io(BASE, { transports: ["websocket"] });
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function sendDeposit(privateKeyHex, escrowAddress, matchIdHex, wagerWeiBigInt) {
+  const account = privateKeyToAccount(privateKeyHex);
+  const transport = http(RPC_URL);
+  const client = createWalletClient({ account, chain, transport });
+  const hash = await client.writeContract({
+    address: escrowAddress,
+    abi: ESCROW_ABI,
+    functionName: "deposit",
+    args: [matchIdHex],
+    value: wagerWeiBigInt,
+    account,
+    chain,
+  });
+  return hash;
+}
+
+function getPublicClient() {
+  return createPublicClient({ chain, transport: http(RPC_URL) });
+}
+
+async function main() {
+  console.log("Backend:", BASE);
+  console.log("Escrow:", ESCROW_ADDRESS || "(skip on-chain)");
+  console.log("Timing: REALTIME —", ROUND_DELAY_SECONDS, "detik per ronde (production-like).");
+  console.log("(Satu game bisa ~1.5–3.5 menit untuk best-of-5.)\n");
+
+  const withEscrow = ESCROW_ADDRESS && RPC_URL && AGENT1_PK && AGENT2_PK;
+  if (withEscrow) {
+    requireEnv("ESCROW_ADDRESS", ESCROW_ADDRESS);
+    requireEnv("AGENT1_PRIVATE_KEY", AGENT1_PK);
+    requireEnv("AGENT2_PRIVATE_KEY", AGENT2_PK);
+  } else {
+    console.log("Env escrow/agent keys tidak lengkap → tes tanpa deposit.\n");
+  }
+
+  const health = await fetch(`${BASE}/health`);
+  if (!health.ok) throw new Error("Backend tidak jalan. Jalankan: npm run dev");
+
+  const wallet1 = withEscrow ? privateKeyToAccount(AGENT1_PK).address : "0xTest1";
+  const wallet2 = withEscrow ? privateKeyToAccount(AGENT2_PK).address : "0xTest2";
+
+  console.log("1. Register 2 agents...");
+  const a1 = await register("RealtimeAgent1_" + Date.now(), wallet1);
+  const a2 = await register("RealtimeAgent2_" + Date.now(), wallet2);
+  console.log("   Agent1:", a1.agent_id, "| Agent2:", a2.agent_id);
+
+  console.log("2. Connect & authenticate...");
+  const s1 = connectSocket();
+  const s2 = connectSocket();
+  const p1 = new Promise((resolve, reject) => {
+    s1.on("authenticated", resolve);
+    s1.on("auth_error", reject);
+  });
+  const p2 = new Promise((resolve, reject) => {
+    s2.on("authenticated", resolve);
+    s2.on("auth_error", reject);
+  });
+  s1.emit("authenticate", { apiKey: a1.api_key });
+  s2.emit("authenticate", { apiKey: a2.api_key });
+  await Promise.all([p1, p2]);
+  console.log("   OK.");
+
+  console.log("3. join_queue (wager_tier 1)...");
+  let gameId = null;
+  let gameMatchedPayload = null;
+  const gameMatched = new Promise((resolve) => {
+    const onMatch = (d) => {
+      gameId = d.gameId;
+      gameMatchedPayload = d;
+      resolve(d);
+    };
+    s1.on("game_matched", onMatch);
+    s2.on("game_matched", onMatch);
+  });
+  s1.emit("join_queue", { wager_tier: 1 });
+  s2.emit("join_queue", { wager_tier: 1 });
+  await gameMatched;
+  console.log("   game_matched, gameId:", gameId);
+
+  if (withEscrow && gameMatchedPayload?.escrow_address && gameMatchedPayload?.deposit_match_id_hex != null) {
+    const wagerWei = BigInt(gameMatchedPayload.wager_wei || "100000000000000000");
+    const matchIdHex = gameMatchedPayload.deposit_match_id_hex;
+    console.log("4. Deposit HBAR ke escrow...");
+    const [tx1, tx2] = await Promise.all([
+      sendDeposit(AGENT1_PK, ESCROW_ADDRESS, matchIdHex, wagerWei),
+      sendDeposit(AGENT2_PK, ESCROW_ADDRESS, matchIdHex, wagerWei),
+    ]);
+    console.log("   Agent1 tx:", tx1);
+    console.log("   Agent2 tx:", tx2);
+    console.log("   Menunggu konfirmasi deposit on-chain...");
+    const publicClient = getPublicClient();
+    await Promise.all([
+      publicClient.waitForTransactionReceipt({ hash: tx1 }),
+      publicClient.waitForTransactionReceipt({ hash: tx2 }),
+    ]);
+    console.log("   Kedua deposit ter-confirm.");
+    s1.emit("deposit_tx", { gameId, txHash: tx1 });
+    s2.emit("deposit_tx", { gameId, txHash: tx2 });
+  } else {
+    console.log("4. (Skip deposit)");
+  }
+
+  function reAuthAndJoin(socket, apiKey, gid) {
+    if (!gid) return;
+    socket.emit("authenticate", { apiKey });
+    socket.once("authenticated", () => {
+      socket.emit("join_game", { gameId: gid });
+    });
+  }
+  s1.on("connect", () => reAuthAndJoin(s1, a1.api_key, gameId));
+  s2.on("connect", () => reAuthAndJoin(s2, a2.api_key, gameId));
+
+  console.log("5. join_game (tunggu round_start atau waiting_deposits)...");
+  s1.emit("join_game", { gameId });
+  s2.emit("join_game", { gameId });
+
+  let roundStarted = false;
+  const roundStartPromise = new Promise((resolve) => {
+    const onStart = () => {
+      if (!roundStarted) {
+        roundStarted = true;
+        resolve();
+      }
+    };
+    s1.on("round_start", onStart);
+    s2.on("round_start", onStart);
+  });
+  const waitingDepositsPromise = new Promise((resolve) => {
+    s1.on("waiting_deposits", (d) => resolve(d));
+    s2.on("waiting_deposits", (d) => resolve(d));
+  });
+
+  const first = await Promise.race([
+    roundStartPromise.then(() => "round_start"),
+    waitingDepositsPromise.then(() => "waiting_deposits"),
+    sleep(15000).then(() => "timeout"),
+  ]);
+
+  if (first === "waiting_deposits") {
+    console.log("   Backend: waiting_deposits. Re-join_game setiap 5s sampai round_start...");
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline) {
+      await sleep(5000);
+      s1.emit("join_game", { gameId });
+      s2.emit("join_game", { gameId });
+      const next = await Promise.race([
+        roundStartPromise.then(() => "round_start"),
+        sleep(8000).then(() => null),
+      ]);
+      if (next === "round_start") break;
+    }
+    if (!roundStarted) {
+      console.error("   Timeout: round_start tidak diterima setelah 90s.");
+      process.exit(1);
+    }
+  } else if (first === "timeout") {
+    console.error("   Timeout 15s: tidak dapat round_start atau waiting_deposits.");
+    process.exit(1);
+  }
+
+  console.log("   round_start diterima, main dimulai.\n");
+
+  const choices = ["rock", "paper", "scissors"];
+  const roundDelayMs = ROUND_DELAY_SECONDS * 1000;
+
+  return new Promise((resolve, reject) => {
+    s1.on("round_start", (data) => {
+      console.log("   round_start", data.round, "| tunggu", ROUND_DELAY_SECONDS, "s sebelum throw...");
+    });
+    s2.on("round_start", () => {});
+
+    s1.on("round_result", (data) => {
+      console.log("   round_result", data.round, data.choice1, "vs", data.choice2, "→ winner", data.winnerAgentId ?? "draw");
+    });
+    s2.on("round_result", () => {});
+
+    s1.on("game_ended", (data) => {
+      console.log("   game_ended winner:", data.winner, "score:", data.score);
+      if (data.txHashPayout) console.log("   payout tx:", data.txHashPayout);
+      s1.close();
+      s2.close();
+      resolve();
+    });
+    s2.on("game_ended", () => {});
+
+    s1.on("error", (e) => console.warn("socket1 error", e));
+    s2.on("error", (e) => console.warn("socket2 error", e));
+
+    const playRound = () => {
+      const c1 = choices[Math.floor(Math.random() * 3)];
+      const c2 = choices[Math.floor(Math.random() * 3)];
+      s1.emit("throw", { choice: c1 });
+      s2.emit("throw", { choice: c2 });
+    };
+
+    s1.on("round_start", () => setTimeout(playRound, roundDelayMs));
+    setTimeout(playRound, roundDelayMs);
+  });
+}
+
+main()
+  .then(() => {
+    console.log("\nDone. Full flow (realtime) OK.");
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error("Test failed:", err.message || err);
+    process.exit(1);
+  });
